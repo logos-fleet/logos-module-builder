@@ -1,7 +1,7 @@
 # ui_qml module builder — QML view + optional C++ backend (process-isolated).
 # Calls buildCppPlugin only when config.main is set; the resulting `combined`
 # output bundles the plugin .so (when present) with the QML view directory.
-{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-module, uiBackend, coreBackend, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app }:
+{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, uiBackend, coreBackend, builderRoot, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app }:
 
 {
   # Required: Path to the module source
@@ -36,9 +36,70 @@
 }:
 
 let
+  metadataJson = builtins.readFile configFile;
+
   # Parse metadata first so we can decide whether to build a C++ backend at all.
-  rawConfig = parseMetadata.parseModuleConfig (builtins.readFile configFile);
+  #
+  # NO platform here, and this file is the one that most needs saying why. Three
+  # of the reads below — `config.type`, `config.view`, `config.main` — happen
+  # above forAllSystems and decide the flake's output SHAPE, not just its
+  # contents: `hasBackend` gates whether `packages.<sys>` even has a `-lib`
+  # attribute. A per-system answer for `main` would make the ATTRIBUTE NAMES
+  # differ between systems, which is not something a flake can express.
+  #
+  # A module cannot platform-key `main` at all — resolvePlatforms refuses it in
+  # `topDeferred`, on every target and with no target, so the throw arrives at
+  # the overlay rather than here. That refusal replaced an earlier arrangement
+  # in which `main` WAS overlay-able and this read was supposed to be the thing
+  # that caught it, via resolvePlatforms.poisonField. It was not: mkLogosModule's
+  # only read of `config.main` is modulePreConfigure.nix:200's legacy-interface
+  # guard, which only ever throws — so a CORE module keying it sailed through
+  # with no diagnostic anywhere and shipped a manifest naming a plugin that does
+  # exist on the non-base targets. A guard that fires for one module type and
+  # silently does not for the other is not a guard.
+  #
+  # The reasoning for parsing with no platform here is unaffected: `type` and
+  # `view` still decide output shape, and the plugin's file EXTENSION is already
+  # handled centrally by common.getPluginFilename, so there is no case a
+  # per-platform `main` serves that is not better served there.
+  rawConfig = parseMetadata.parseModuleConfig { json = metadataJson; platform = null; };
   config = common.recursiveMerge [ rawConfig configOverrides ];
+
+  # The resolved config per target, rebound as `config` inside every per-system
+  # closure below.
+  configFor = system: common.recursiveMerge [
+    (parseMetadata.parseModuleConfig {
+      json = metadataJson;
+      platform = parseMetadata.platformForSystem system;
+    })
+    configOverrides
+  ];
+
+  # ── The document the ARTIFACT carries ─────────────────────────────────────
+  #
+  # `configFile` is the SOURCE, overlays unapplied. Ship it and a platform-keyed
+  # field is resolved for the BUILD and not for the artifact: the loader, lgpm
+  # and the .lgx manifest all read the base answer. That gap is why
+  # `dependencies` was a refused overlay key.
+  #
+  # Written from `_raw` — the RESOLVED tree, which keeps the object entry form
+  # that carries an installer's version/signer constraints. The normalised
+  # `config` would flatten those to names.
+  #
+  # Null for a module with no `platforms` anywhere: there is nothing to resolve,
+  # and the source file goes on reaching the artifact byte-identically.
+  hasPlatformOverlays =
+    let j = builtins.fromJSON metadataJson;
+    in (j ? platforms) || (builtins.isAttrs (j.nix or null) && (j.nix ? platforms));
+  resolvedMetadataFileFor = pkgs: system:
+    if !hasPlatformOverlays then null
+    else pkgs.writeText "metadata.json" (builtins.toJSON (configFor system)._raw);
+
+  # The same answer as a path that always exists — the source file is the
+  # resolved document for a module with nothing to resolve.
+  shippedMetadataFor = pkgs: system:
+    let f = resolvedMetadataFileFor pkgs system;
+    in if f == null then configFile else f;
 
   # Validate: view modules must be type "ui_qml" with a "view" field.
   # The "main" backend library is OPTIONAL — if absent, the module is QML-only and
@@ -54,7 +115,7 @@ let
 
   # Delegate compilation to the shared build pipeline (only when there's a backend).
   buildCppPlugin = import ./buildCppPlugin.nix {
-    inherit nixpkgs lib common parseMetadata logos-cpp-sdk logos-protocol logos-qt-sdk logos-module uiBackend coreBackend nix-bundle-lgx nix-bundle-logos-module-install;
+    inherit nixpkgs lib common parseMetadata logos-cpp-sdk logos-protocol logos-qt-sdk logos-plugin-qt logos-view-module logos-module uiBackend coreBackend builderRoot nix-bundle-lgx nix-bundle-logos-module-install;
   };
 
   built =
@@ -76,7 +137,7 @@ let
   pkgsFor = system:
     if hasBackend
     then built.perSystem.${system}.pkgs
-    else import nixpkgs { inherit system; };
+    else common.mkPkgs system;
 
   # Helper: create a combined derivation from a plugin lib + QML view from source.
   # Used for both default and portable variants. For QML-only modules, pluginLib is null.
@@ -97,8 +158,11 @@ let
         fi
       ''}
 
-      # Include metadata.json and icons in the output
-      cp ${configFile} $out/lib/metadata.json
+      # Include metadata.json and icons in the output. The RESOLVED document
+      # when the module has overlays — this file is what lgpm and the .lgx
+      # manifest read, so shipping the source here is what made a platform-keyed
+      # field resolve for the build and not for the artifact.
+      cp ${shippedMetadataFor pkgs system} $out/lib/metadata.json
       ${iconInstall}
 
       # Copy QML view files from source.
@@ -147,6 +211,7 @@ let
   # Package outputs
   packages = forAllSystems (system:
     let
+      config = configFor system;
       moduleLib =
         if hasBackend then built.perSystem.${system}.moduleLib else null;
       moduleLibPortable =
@@ -231,7 +296,8 @@ let
 
   apps = forAllSystems (system:
     let
-      pkgs = import nixpkgs { inherit system; };
+      pkgs = common.mkPkgs system;
+      config = configFor system;
       # Collect all module dependencies (direct + transitive) for bundling
       allDeps = common.collectAllModuleDeps system flakeInputs config.dependencies;
     in {
@@ -264,6 +330,7 @@ let
     let
       mkPluginTest = resolvedStandalone.lib.${system}.mkPluginTest;
       pkgs = pkgsFor system;
+      config = configFor system;
       allDeps = common.collectAllModuleDeps system flakeInputs config.dependencies;
     in {
       integration-test = mkPluginTest {
@@ -295,5 +362,7 @@ in {
     else lib.genAttrs common.systems (system:
       { default = (pkgsFor system).mkShell {}; });
   inherit apps config;
-  metadataJson = builtins.readFile configFile;
+  # The RESOLVED config per target — see the `configFor` comment above.
+  configFor = lib.genAttrs common.systems configFor;
+  inherit metadataJson;
 }

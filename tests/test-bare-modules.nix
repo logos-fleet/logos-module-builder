@@ -42,18 +42,24 @@ let
   relayBare = relay.packages.${system}.bare;
   rustBare = rustModule.packages.${system}.bare;
 
-  # A hand-written Qt module has no protocol-free form to extract, so it must
-  # not advertise a `bare` output at all. Pure evaluation — nothing is built.
-  legacyQtModule = mkLogosModule {
-    src = fixturesRoot + "/core-module";
-    configFile = fixturesRoot + "/core-module/metadata.json";
-  };
-  legacyHasNoBare =
-    if legacyQtModule.packages.${system} ? bare
-    then builtins.throw "FAIL: a legacy Qt module (no `interface`) must not expose a `bare` output"
-    else true;
+  # A Qt plugin object holding a LogosAPI has no protocol-free form to extract,
+  # so it must not advertise a `bare` output at all. Both fixtures below are
+  # `interface: legacy` (the key is absent) — one a hand-written Qt core module,
+  # one a ui_qml view backend. Pure evaluation — nothing is built.
+  noBare = label: fixture:
+    let m = mkLogosModule {
+          src = fixturesRoot + "/${fixture}";
+          configFile = fixturesRoot + "/${fixture}/metadata.json";
+        };
+    in if m.packages.${system} ? bare
+       then builtins.throw "FAIL: ${label} (${fixture}) must not expose a `bare` output"
+       else true;
 
-in assert legacyHasNoBare; pkgs.runCommand "bare-modules-tests" {
+  qtPluginsHaveNoBare =
+    noBare "a hand-written Qt core module" "test-framework-module"
+    && noBare "a ui_qml view backend" "qml-module";
+
+in assert qtPluginsHaveNoBare; pkgs.runCommand "bare-modules-tests" {
   nativeBuildInputs =
     if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.darwin.cctools ] else [ pkgs.binutils ];
 } ''

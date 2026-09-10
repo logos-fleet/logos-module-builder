@@ -2,7 +2,7 @@
 # resolution, plugin compilation (via backend), header generation, dev shells,
 # and LGX bundling.  Callers (mkLogosModule, mkLogosQmlModule) compose final
 # `packages` and `apps` outputs differently.
-{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-module, uiBackend, coreBackend, nix-bundle-lgx, nix-bundle-logos-module-install }:
+{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, uiBackend, coreBackend, builderRoot, nix-bundle-lgx, nix-bundle-logos-module-install }:
 
 {
   src,
@@ -17,9 +17,63 @@
 }:
 
 let
-  # Parse the module configuration
-  rawConfig = parseMetadata.parseModuleConfig (builtins.readFile configFile);
+  metadataJson = builtins.readFile configFile;
+
+  # `config` is parsed with NO platform: it answers only for the fields no
+  # `platforms` overlay may vary (name / version / type / interface), which are
+  # the fields read here above forAllSystems — `selectedBackend` below, and the
+  # system-agnostic `config` flake output. A platform-keyed field read off it
+  # THROWS rather than handing back the base value; `configFor system` is the
+  # resolved answer, and every per-system closure rebinds `config` to it.
+  # See lib/resolvePlatforms.nix for the reasoning behind that split.
+  rawConfig = parseMetadata.parseModuleConfig { json = metadataJson; platform = null; };
   config = common.recursiveMerge [ rawConfig configOverrides ];
+
+  configFor = system: common.recursiveMerge [
+    (parseMetadata.parseModuleConfig {
+      json = metadataJson;
+      platform = parseMetadata.platformForSystem system;
+    })
+    configOverrides
+  ];
+
+  # ── The document the ARTIFACT carries ─────────────────────────────────────
+  #
+  # `configFile` is the SOURCE, overlays unapplied. Ship it and a platform-keyed
+  # field is resolved for the BUILD and not for the artifact: the loader, lgpm
+  # and the .lgx manifest all read the base answer. That gap is why
+  # `dependencies` was a refused overlay key.
+  #
+  # Written from `_raw` — the RESOLVED tree, which keeps the object entry form
+  # that carries an installer's version/signer constraints. The normalised
+  # `config` would flatten those to names.
+  #
+  # Null for a module with no `platforms` anywhere: there is nothing to resolve,
+  # and the source file goes on reaching the artifact byte-identically.
+  hasPlatformOverlays =
+    let j = builtins.fromJSON metadataJson;
+    in (j ? platforms) || (builtins.isAttrs (j.nix or null) && (j.nix ? platforms));
+  resolvedMetadataFileFor = pkgs: system:
+    if !hasPlatformOverlays then null
+    else pkgs.writeText "metadata.json" (builtins.toJSON (configFor system)._raw);
+  # The SOURCE a plugin build sees, with the resolved document already in it.
+  #
+  # Staging it from preConfigure is too late: logos-plugin-qt splices that hook
+  # at the END of its generation script, after the umbrella generator has
+  # already read ./metadata.json (buildPlugin.nix runs `${generatorCalls}` and
+  # only then `${preConfigure}`). A dependency added by an overlay would link
+  # and then have no `modules()` member — exactly the failure the refusal
+  # warned about. Putting it in the source instead lands it before anything
+  # reads it, and needs no change on the backend side.
+  srcFor = pkgs: system:
+    let f = resolvedMetadataFileFor pkgs system;
+    in if f == null then src
+       else pkgs.runCommand "logos-${config.name}-src-resolved" {} ''
+         cp -R --no-preserve=mode,ownership ${src} $out
+         cp --no-preserve=mode ${f} $out/metadata.json
+       '';
+
+
 
   # Select backend based on module type: core modules are swappable, UI stays Qt
   selectedBackend =
@@ -36,84 +90,64 @@ let
 
   forAllSystems = f: lib.genAttrs common.systems (system: f system);
 
+  # WHICH cmake/LogosModule.cmake this module configures with. Same answer as
+  # mkLogosModule's: the builder's, always.
+  #
+  # This used to be `optionalAttrs (pathExists (src + "/cmake/LogosModule.cmake"))`
+  # — set LOGOS_MODULE_BUILDER_ROOT only when the MODULE itself shipped a copy.
+  # No module does, so every ui_qml plugin built through here fell through to
+  # the backend's own default (logos-plugin-qt's root, set in its
+  # lib/default.nix) while mkLogosModule's core path used the builder's copy.
+  # Two copies of one file, selected by module TYPE, both compiling — which is
+  # how a stale host-runtime repoint stayed invisible in a green tree.
+  #
+  # The module-local branch is gone with it: an unconditional value is what
+  # makes "there is one copy" a property of the code rather than of what
+  # happens to be on disk. A module that really must patch the build has
+  # LINK_TARGETS / extraCmakeFlags / its own CMakeLists, none of which silently
+  # displace this file.
+  cmakeRoot =
+    if builtins.pathExists (builderRoot + "/cmake/LogosModule.cmake")
+    then "${builderRoot}"
+    else throw ("logos-module-builder: cmake/LogosModule.cmake is missing from "
+                + "${toString builderRoot}. It is the only copy; no backend ships one.");
+
   # Per-system build outputs
   perSystem = forAllSystems (system:
     let
-      pkgs = import nixpkgs { inherit system; };
+      pkgs = common.mkPkgs system;
+      config = configFor system;
 
-      # ── Concrete dependency classification (mirrors mkLogosModule.nix) ──────
-      # LIDL-based deps → bindings generated from the dep's published `lidl`
-      # output (no dep plugin build). Deps without a `lidl` output take the
-      # TRANSITIONAL header-copy fallback below (which builds them).
-      # Guard every level so a non-flake / raw-derivation dep input returns
-      # null (→ TRANSITIONAL header-copy fallback) rather than throwing.
-      depLidlOf = name:
-        let i = flakeInputs.${name} or null;
-        in if i != null && i ? packages && i.packages ? ${system}
-           then (i.packages.${system}.lidl or null)
-           else null;
-      depIsLidl = name: (config.dependency_overrides ? ${name}) || (depLidlOf name != null);
-      staticDeps = map (name:
-        let ov = config.dependency_overrides.${name} or null;
-        in if ov != null then {
-             inherit name;
-             impl_class = ov.impl_class;
-             path = if ov.input != null
-                    then (if flakeInputs ? ${ov.input}
-                          then "${flakeInputs.${ov.input}}/${ov.file}"
-                          else throw "dependency_overrides.${name}: flake input '${ov.input}' was not passed to mkLogosQmlModule.")
-                    else "${src}/${ov.file}";
-           } else {
-             inherit name;
-             impl_class = null;
-             path = "${depLidlOf name}/${name}.lidl";
-           }
-      ) (lib.filter depIsLidl config.dependencies);
-      legacyHeaderDepNames = lib.filter (name: !(depIsLidl name)) config.dependencies;
+      # Concrete dependencies → typed wrappers from each dep's published LIDL
+      # (no dep build). A dependency that publishes none is refused by name;
+      # `optional_dependencies` are treated the same — see
+      # common.classifyConcreteDeps.
+      concreteDeps = common.classifyConcreteDeps {
+        inherit system flakeInputs src config;
+        builderName = "mkLogosQmlModule";
+      };
+      inherit (concreteDeps) staticDeps;
 
-      # Resolve the TRANSITIONAL header-copy deps from inputs. Each entry is a
-      # struct exposing the dep's plugin (.lib) plus the header variants
-      # (.headers-qt / .headers-lp) so the plugin builder can pick the one
-      # matching its own --api-style. See the matching block in mkLogosModule.nix
-      # for the full rationale + fallback chain. Remove once all deps publish LIDL.
-      # Everything built through here is a view module (type: ui_qml), which
-      # buildPlugin.nix always types "qt" — the `headers-lp` entry exists so an
-      # lp consumer that ever reaches this path fails with a real message
-      # instead of a "cannot coerce a set to a string" from the header copy.
-      moduleInputs = lib.filterAttrs (n: _: builtins.elem n legacyHeaderDepNames) flakeInputs;
-      resolvedModuleDeps = lib.mapAttrs (depName: input:
-        let
-          ps = input.packages.${system} or null;
-          fallback = if input ? packages.${system}.default
-                     then input.packages.${system}.default else input;
-          staleLpDep = reason: throw ''
-            logos-module-builder: dependency '${depName}' cannot be consumed by an lp (Qt-free) module.
-
-            '${depName}' is taking the transitional header-copy path (it publishes
-            no `lidl` output), and
-              ${reason}.
-            So the only headers it offers are Qt-typed. Copying those into a
-            Qt-free translation unit fails deep inside a generated source file
-            with a wall of unrelated-looking Qt type errors, so this build stops
-            here instead.
-
-            Fix: rebuild / re-pin '${depName}' against a current logos-module-builder.
-            Any module built by one publishes a `lidl` contract (preferred — it
-            skips the header copy entirely) as well as a `headers-lp` output.
-          '';
-        in
-        if ps != null then {
-          default     = ps.default;
-          lib         = ps.lib or ps.default;
-          headers-qt  = ps.headers-qt or ps.include or ps.default;
-          headers-lp  = ps.headers-lp or (staleLpDep "its packages.${system} exposes no `headers-lp`");
-        } else {
-          default     = fallback;
-          lib         = fallback;
-          headers-qt  = fallback;
-          headers-lp  = staleLpDep "the flake input is a bare derivation with no packages.${system} attrset";
-        }
-      ) moduleInputs;
+      # Resolve interface dependencies (method/event contracts) to concrete
+      # definition-file paths — the same resolution mkLogosModule.nix does, for
+      # the same reason: the generators must never touch flake inputs, they just
+      # receive `<name>=<path>[=<impl_class>]`.
+      #
+      # This used to be omitted here, and a QML module's interfaces reached the
+      # generator only through logos-cpp-generator's own fallback (it re-reads
+      # metadata.json and resolves LOCAL entries relative to it). That fallback
+      # SKIPS any entry with an `input`, so a cross-repo interface silently lost
+      # its `bind_<name>` factory; and it is invisible to logos-plugin-qt, which
+      # now emits the Qt-typed wrapper itself and can only do so for the
+      # interfaces it was told about.
+      resolvedInterfaceDeps = map (e: {
+        inherit (e) name impl_class;
+        path = if e.input != null
+               then (if flakeInputs ? ${e.input}
+                     then "${flakeInputs.${e.input}}/${e.file}"
+                     else throw "interface_dependencies: interface '${e.name}' references flake input '${e.input}', but no such input was passed to mkLogosQmlModule (declare it in flake.nix and pass it via flakeInputs).")
+               else "${src}/${e.file}";
+      }) config.interface_dependencies;
 
       # Resolve a single externalLibInputs entry for a given variant.
       # Supports both simple (bare flake input) and structured ({ input, packages }) formats.
@@ -139,10 +173,78 @@ let
 
       # Resolve SDK deps for this system — injected into the backend
       logosSdk = logos-cpp-sdk.packages.${system}.default;
+      # Build-platform half of the SDK. logos-cpp-generator is invoked by BARE
+      # NAME from a build phase (logos-plugin-qt/lib/buildPlugin.nix:145), so it
+      # must run on the builder. Under cross, packages.x86_64-windows.default
+      # carries no runnable generator at all -- logos-cpp-sdk/nix/bin.nix:39
+      # silently skips the mingw .exe -- hence "command not found".
+      #
+      # `logosSdk` deliberately stays TARGET-typed: it is ALSO the header and
+      # CMake-package root passed to LOGOS_CPP_SDK_ROOT, and those must keep
+      # coming from the Windows set. Splitting the two roles is the whole point;
+      # pointing the headers at the build system would produce a build that
+      # SUCCEEDS while linking the wrong architecture.
+      #
+      # buildSystemFor is the identity on every native system, so this is a
+      # no-op off the Windows target.
+      logosSdkBuild = logos-cpp-sdk.packages.${common.buildSystemFor system}.default;
       logosQtSdk = logos-qt-sdk.packages.${system}.default;
+      # The Qt HOST RUNTIME (LogosAPI, LogosAPIProvider, LogosProviderBase, the
+      # legacy PluginInterface) a plugin links. It moved out of logos-qt-sdk
+      # into logos-plugin-qt and ships as `logos-qt-host`; logos-qt-sdk still
+      # forwards it, so this is the repoint, not a new dependency. TARGET-typed
+      # like logosQtSdk — it is a library that gets linked into the plugin.
+      # logos-qt-sdk stays for what the host runtime never carried: the
+      # Qt-typed logos_qt_lp_bridge.h / logos_qt_wire.h / logos_ui_plugin_context.h
+      # and the logos-qt-generator that emits #includes of them.
+      logosQtHost = logos-plugin-qt.packages.${system}.logos-qt-host;
       # The Qt glue generator (universal/cdylib/ui backends) — Qt code is
       # the Qt layer's product; logos-cpp-generator keeps Qt-free outputs.
-      logosQtGenerator = logos-qt-sdk.packages.${system}.logos-qt-generator;
+      logosQtGenerator = logos-qt-sdk.packages.${common.buildSystemFor system}.logos-qt-generator;
+      # The cdylib Qt-plugin glue generator lives in logos-plugin-qt (the Qt
+      # plugin BACKEND owns the glue; the SDK does not). logos-qt-sdk still
+      # ships an older copy of the SAME emitter, and calling that one is not a
+      # compile error — it silently emits STALE glue. That is how a
+      # host-services grant went undelivered while every build stayed green.
+      logosQtHostGenerator =
+        logos-plugin-qt.packages.${common.buildSystemFor system}.logos-qt-host-generator;
+      # The four LogosView*.in templates logos_module(REP_FILE ...) instantiates
+      # — and this is the ui_qml path, so effectively every consumer of them.
+      # They live in logos-view-module now, not in the plugin backend, and
+      # cmake/LogosModule.cmake here hard-errors rather than guessing.
+      #
+      # buildSystemFor, not plain ${system}: text files with no platform
+      # dimension, and logos-view-module publishes only the four NATIVE
+      # systems, so `packages.x86_64-windows` would EVAL-fail on the Windows leg.
+      viewTemplates =
+        logos-view-module.packages.${common.buildSystemFor system}.logos-view-templates;
+      # The VIEW plugin glue generator (`--backend ui`). It lives in
+      # logos-view-module, beside the LogosView*.in templates the glue it emits
+      # is compiled against and beside logos_ui_plugin_context.h, which that
+      # glue calls into -- the three are one authoring surface and used to be
+      # split across two repos. logos-qt-sdk shipped the same emitter and
+      # rotted: it gained the teardown hook, the copy here did not, and nothing
+      # detected it because a missing hook is silent at every layer.
+      #
+      # buildSystemFor: a code generator RUNS on the build machine, and
+      # logos-view-module publishes only the four NATIVE systems, so plain
+      # ${system} would EVAL-fail on the Windows leg.
+      logosViewGenerator =
+        logos-view-module.packages.${common.buildSystemFor system}.logos-view-generator;
+      # logos_ui_plugin_context.h -- the context a view's *Backend derives, and
+      # the header the emitted glue calls maybeUiPluginAboutToUnload() in.
+      #
+      # It comes from logos-view-module, the SAME pin as the generator above,
+      # and that is the whole point. The emitter and this header are one
+      # MATCHED PAIR: the emitter writes a call, the header declares what it
+      # calls. While both lived in logos-qt-sdk they moved together under one
+      # pin and could not disagree. Sourcing the generator from one repo and
+      # this header from another would make every ui_qml build depend on two
+      # pins agreeing, with nothing enforcing it -- and the failure is a
+      # compile error deep inside GENERATED code, far from the pin that caused
+      # it. One pin, one pair.
+      logosViewInclude =
+        logos-view-module.packages.${common.buildSystemFor system}.include;
       logosProtocolPkg = logos-protocol.packages.${system}.default;
       logosModule = logos-module.packages.${system}.default;
 
@@ -173,8 +275,6 @@ let
         externalInputs = defaultResolvedExternalLibs;
       };
 
-      hasBuilderCmake = builtins.pathExists (src + "/cmake/LogosModule.cmake");
-
       goCmakeFlags = lib.optionals (config.go_static_lib_names or [] != []) [
         "-DLOGOS_MODULE_GO_STATIC_LIBS=${lib.concatStringsSep ";" config.go_static_lib_names}"
       ];
@@ -203,24 +303,48 @@ let
             copyExternals = false;
           };
         in ({
-          inherit pkgs src config postInstall logosModule;
+          inherit pkgs config postInstall logosModule;
+          src = srcFor pkgs system;
           preConfigure = preConfigureStr;
-          moduleDeps = resolvedModuleDeps;
           inherit externalLibs;
-          extraNativeBuildInputs = extraNativeBuildInputs ++ buildPkgs ++ [ logosSdk logosQtGenerator pkgs.jq ];
-          extraBuildInputs = extraBuildInputs ++ runtimePkgs ++ [ logosQtSdk logosProtocolPkg ];
-          extraCmakeFlags = [
+          # pkgs.jq is target-typed too and jq runs in preConfigure
+          # (modulePreConfigure.nix:203). buildPackages == pkgs natively.
+          extraNativeBuildInputs = extraNativeBuildInputs ++ buildPkgs ++ [ logosSdkBuild logosQtGenerator logosQtHostGenerator logosViewGenerator pkgs.buildPackages.jq ];
+          extraBuildInputs = extraBuildInputs ++ runtimePkgs ++ [ logosQtSdk logosQtHost logosProtocolPkg ];
+          # Qt splits each module's TOOLS (repc, moc, qmltyperegistrar) into a
+          # SEPARATE package that must run on the BUILD machine. Without these
+          # flags find_package(Qt6 COMPONENTS RemoteObjects) fails on a
+          # thoroughly misleading message -- it names Qt6RemoteObjects, but the
+          # TARGET config is found fine; it is Qt6RemoteObjectsTools that is
+          # missing. logos-nix's Windows overlay exposes the flags; the
+          # attribute is absent (and so `or []`) on a native build, which is why
+          # this needs no isWindows guard.
+          extraCmakeFlags = (pkgs.logosQtCrossCmakeFlags or [ ]) ++ [
             "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
             "-DLOGOS_QT_SDK_ROOT=${logosQtSdk}"
+            "-DLOGOS_QT_HOST_ROOT=${logosQtHost}"
             "-DLOGOS_PROTOCOL_ROOT=${logosProtocolPkg}"
+            "-DLOGOS_VIEW_TEMPLATE_DIR=${viewTemplates}"
+            "-DLOGOS_VIEW_INCLUDE_DIR=${logosViewInclude}"
           ] ++ goCmakeFlags;
           extraEnv = {
             LOGOS_CPP_SDK_ROOT = "${logosSdk}";
             LOGOS_QT_SDK_ROOT = "${logosQtSdk}";
+            LOGOS_QT_HOST_ROOT = "${logosQtHost}";
             LOGOS_PROTOCOL_ROOT = "${logosProtocolPkg}";
-          } // lib.optionalAttrs hasBuilderCmake {
-            LOGOS_MODULE_BUILDER_ROOT = "${src}";
+            LOGOS_MODULE_BUILDER_ROOT = cmakeRoot;
+            # Both channels on purpose: LogosModule.cmake prefers the cache
+            # variable above and falls back to this env var, and the two reach
+            # different consumers — the flag a nix cmakeConfigurePhase, the env
+            # var a hand-run `cmake` where no cmakeFlags exist.
+            LOGOS_VIEW_TEMPLATE_DIR = "${viewTemplates}";
+            LOGOS_VIEW_INCLUDE_DIR = "${logosViewInclude}";
           };
+        }
+        # Only pass interfaceDeps when the module declares any — keeps existing
+        # modules buildable against a backend that predates the feature.
+        // lib.optionalAttrs (config.interface_dependencies != []) {
+          interfaceDeps = resolvedInterfaceDeps;
         }
         # LIDL-based concrete deps → `--dep` flags (no dep plugin build).
         // lib.optionalAttrs (staticDeps != []) {
@@ -238,9 +362,24 @@ let
       # instead of compiling. Matches a real build.
       moduleGenerate = selectedBackend.generate (mkPluginArgs "default");
 
-      # Delegate header generation to the backend
+      # Delegate header generation to the backend.
+      #
+      # This is the LAST caller that still takes buildHeaders' legacy Qt
+      # emitter (plugin introspection) by construction: no `contractLidl` is
+      # passed because this pipeline computes none — unlike mkLogosModule, it
+      # publishes no `lidl` output for the module it is building, so there is
+      # nothing to generate a contract-driven wrapper FROM.
+      #
+      # It costs nothing today: mkLogosQmlModule — the only caller of
+      # buildCppPlugin — uses `moduleLib` and never reads `moduleInclude`, so
+      # this derivation is never realised. A ui_qml module is a leaf; nothing
+      # consumes its client wrapper. Wiring a contract in here therefore has to
+      # start by giving the QML pipeline a `lidl` output, not by adding a flag.
       moduleInclude = selectedBackend.buildHeaders {
-        inherit pkgs src config logosSdk;
+        inherit pkgs src config;
+        # buildHeaders uses this ONLY to put the generator on PATH -- a pure
+        # tool role.
+        logosSdk = logosSdkBuild;
         pluginLib = moduleLib;
       };
 
@@ -252,12 +391,72 @@ let
   # Development shell (delegates to backend for deps)
   devShells = forAllSystems (system:
     let
-      pkgs = import nixpkgs { inherit system; };
+      pkgs = common.mkPkgs system;
+      config = configFor system;
       logosSdk = logos-cpp-sdk.packages.${system}.default;
+      # Build-platform half of the SDK. logos-cpp-generator is invoked by BARE
+      # NAME from a build phase (logos-plugin-qt/lib/buildPlugin.nix:145), so it
+      # must run on the builder. Under cross, packages.x86_64-windows.default
+      # carries no runnable generator at all -- logos-cpp-sdk/nix/bin.nix:39
+      # silently skips the mingw .exe -- hence "command not found".
+      #
+      # `logosSdk` deliberately stays TARGET-typed: it is ALSO the header and
+      # CMake-package root passed to LOGOS_CPP_SDK_ROOT, and those must keep
+      # coming from the Windows set. Splitting the two roles is the whole point;
+      # pointing the headers at the build system would produce a build that
+      # SUCCEEDS while linking the wrong architecture.
+      #
+      # buildSystemFor is the identity on every native system, so this is a
+      # no-op off the Windows target.
+      logosSdkBuild = logos-cpp-sdk.packages.${common.buildSystemFor system}.default;
       logosQtSdk = logos-qt-sdk.packages.${system}.default;
       # The Qt glue generator (universal/cdylib/ui backends) — Qt code is
       # the Qt layer's product; logos-cpp-generator keeps Qt-free outputs.
-      logosQtGenerator = logos-qt-sdk.packages.${system}.logos-qt-generator;
+      logosQtGenerator = logos-qt-sdk.packages.${common.buildSystemFor system}.logos-qt-generator;
+      # The cdylib Qt-plugin glue generator lives in logos-plugin-qt (the Qt
+      # plugin BACKEND owns the glue; the SDK does not). logos-qt-sdk still
+      # ships an older copy of the SAME emitter, and calling that one is not a
+      # compile error — it silently emits STALE glue. That is how a
+      # host-services grant went undelivered while every build stayed green.
+      logosQtHostGenerator =
+        logos-plugin-qt.packages.${common.buildSystemFor system}.logos-qt-host-generator;
+      # The four LogosView*.in templates logos_module(REP_FILE ...) instantiates
+      # — and this is the ui_qml path, so effectively every consumer of them.
+      # They live in logos-view-module now, not in the plugin backend, and
+      # cmake/LogosModule.cmake here hard-errors rather than guessing.
+      #
+      # buildSystemFor, not plain ${system}: text files with no platform
+      # dimension, and logos-view-module publishes only the four NATIVE
+      # systems, so `packages.x86_64-windows` would EVAL-fail on the Windows leg.
+      viewTemplates =
+        logos-view-module.packages.${common.buildSystemFor system}.logos-view-templates;
+      # The VIEW plugin glue generator (`--backend ui`). It lives in
+      # logos-view-module, beside the LogosView*.in templates the glue it emits
+      # is compiled against and beside logos_ui_plugin_context.h, which that
+      # glue calls into -- the three are one authoring surface and used to be
+      # split across two repos. logos-qt-sdk shipped the same emitter and
+      # rotted: it gained the teardown hook, the copy here did not, and nothing
+      # detected it because a missing hook is silent at every layer.
+      #
+      # buildSystemFor: a code generator RUNS on the build machine, and
+      # logos-view-module publishes only the four NATIVE systems, so plain
+      # ${system} would EVAL-fail on the Windows leg.
+      logosViewGenerator =
+        logos-view-module.packages.${common.buildSystemFor system}.logos-view-generator;
+      # logos_ui_plugin_context.h -- the context a view's *Backend derives, and
+      # the header the emitted glue calls maybeUiPluginAboutToUnload() in.
+      #
+      # It comes from logos-view-module, the SAME pin as the generator above,
+      # and that is the whole point. The emitter and this header are one
+      # MATCHED PAIR: the emitter writes a call, the header declares what it
+      # calls. While both lived in logos-qt-sdk they moved together under one
+      # pin and could not disagree. Sourcing the generator from one repo and
+      # this header from another would make every ui_qml build depend on two
+      # pins agreeing, with nothing enforcing it -- and the failure is a
+      # compile error deep inside GENERATED code, far from the pin that caused
+      # it. One pin, one pair.
+      logosViewInclude =
+        logos-view-module.packages.${common.buildSystemFor system}.include;
       logosProtocolPkg = logos-protocol.packages.${system}.default;
       logosModule = logos-module.packages.${system}.default;
 
@@ -279,10 +478,21 @@ let
       runtimePkgs = map (getPkg pkgs) config.nix_packages.runtime;
     in {
       default = pkgs.mkShell {
-        nativeBuildInputs = backendShell.nativeBuildInputs ++ buildPkgs;
+        # logosViewGenerator: this is the ui_qml dev shell, so it is exactly
+        # the shell where someone hand-runs the view glue codegen.
+        nativeBuildInputs = backendShell.nativeBuildInputs ++ buildPkgs ++ [ logosViewGenerator ];
         buildInputs = backendShell.buildInputs ++ runtimePkgs;
         shellHook = ''
           ${backendShell.shellHook}
+          # The backend no longer exports this — it stopped shipping a
+          # cmake/LogosModule.cmake for it to point at.
+          export LOGOS_MODULE_BUILDER_ROOT="${cmakeRoot}"
+          # Same story, second variable: the backend's devShellInputs shellHook
+          # (spliced in above) stopped exporting this when the LogosView*.in
+          # templates moved to logos-view-module. This is the ui_qml dev shell,
+          # so it is exactly the shell where a hand-run cmake needs it.
+          export LOGOS_VIEW_TEMPLATE_DIR="${viewTemplates}"
+          export LOGOS_VIEW_INCLUDE_DIR="${logosViewInclude}"
           echo "Logos ${config.name} module development environment"
           echo "LOGOS_CPP_SDK_ROOT: $LOGOS_CPP_SDK_ROOT"
           echo "LOGOS_MODULE_ROOT: $LOGOS_MODULE_ROOT"
@@ -315,4 +525,6 @@ let
 
 in {
   inherit config perSystem devShells lgxPackages;
+  # The RESOLVED config per target — see the `configFor` comment above.
+  configFor = forAllSystems configFor;
 }

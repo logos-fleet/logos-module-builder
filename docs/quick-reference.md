@@ -91,6 +91,75 @@ nix build
 }
 ```
 
+### Platform-specific values
+
+`include` and everything under `nix` may be overridden per target by an ordered
+list of overlays. Every matching entry applies, in declaration order; **lists
+concatenate**, **scalars overwrite**, and **objects recurse** (merged key by
+key, base-only keys survive).
+
+```json
+"include": [],
+"platforms": [
+  { "when": { "os": "linux" },   "include": ["libcore.so"] },
+  { "when": { "os": "darwin" },  "include": ["libcore.dylib"] },
+  { "when": { "os": "windows" }, "include": ["libcore.dll"] }
+],
+
+"nix": {
+  "packages": { "runtime": ["nlohmann_json"] },
+  "platforms": [
+    { "when": { "os": "linux" }, "packages": { "runtime": ["krb5"] } }
+  ]
+}
+```
+
+The **empty base** for `include` is the pattern to copy, not a stylistic choice.
+Lists concatenate, so leaving `libcore.so` in the base would resolve darwin to
+`["libcore.so","libcore.dylib"]` — a cross-platform superset, which is exactly
+what the overlays exist to eliminate. The `.so` is the Linux value; it goes in
+the Linux overlay. `nix.packages.runtime` above shows the other case:
+`nlohmann_json` is genuinely correct everywhere, so it stays in the base.
+
+`main` and `dependencies` may **not** be platform-keyed. Not on principle — the
+shipped `metadata.json` is the source file copied verbatim, so a per-target
+value would be resolved for the build and not for the artifact. A `platforms`
+key anywhere but the top level or `nix` (e.g. `nix.packages.platforms`) is a
+hard error, not a silently skipped overlay.
+
+`os` ∈ `linux | darwin | windows`, `architecture` ∈ `x86_64 | aarch64`,
+`abi` ∈ `gnu | unknown` — each independently optional, an empty `when` is an
+error, and an unrecognised value is an error rather than a non-match. Note the
+Windows target is mingw, so its `abi` is `gnu` (and `{"abi":"gnu"}` on its own
+therefore also matches Linux). See `docs/configuration.md` for the full rules.
+
+### App-to-app intents (`ui_qml` only)
+
+A capability another app can ask for by name, without knowing you exist. Add to
+`metadata.json`:
+
+```json
+"provides": [ { "intent": "wallet.send",
+                "params": [ { "name": "to", "type": "string", "required": true } ] },
+              { "intent": "wallet.open", "handoff": true } ],
+"uses":     [ { "intent": "packages.show" } ]
+```
+
+- `provides` — what you can service. `params` is optional, and **enforced**: a
+  missing required field or wrong type is refused before your handler runs.
+  `logos.*` (the platform) and `basecamp.*` (the shell) are reserved and refused
+  here — use your own namespace. `uses` may still name them.
+- `handoff` — optional, default `false`. Navigation only: `false` returns the
+  user to whoever asked once you respond, `true` leaves them with you. When you
+  respond is separate — on arrival, or when the user finishes the action.
+- `uses` — what you may request. Undeclared requests fail `not_declared`.
+- Entries are **objects**; `["wallet.send"]` parses and declares nothing.
+- `core` modules cannot use either — they call each other directly through
+  `LogosAPI`, with no user decision to mediate.
+
+Declaring is not implementing — handle `logos.intentRequested` in QML or the
+request times out. Full reference: [Configuration](configuration.md#provides).
+
 ## CMakeLists.txt Quick Reference
 
 ```cmake
@@ -109,12 +178,13 @@ logos_module(
         mylib
     FIND_PACKAGES
         Protobuf
-    PROTO_FILES
-        src/message.proto
     LINK_LIBRARIES
         pthread
 )
 ```
+
+> `PROTO_FILES` used to be accepted here and is not parsed any more — compile
+> `.proto` files yourself and add the results via `nix.cmake.extra_sources`.
 
 ## flake.nix Quick Reference
 
@@ -190,8 +260,11 @@ logos_module(
 
 ## Source File Templates (universal model)
 
-You write only the impl class. The `*_interface.h` and `*_plugin.{h,cpp}` glue
-(`Q_PLUGIN_METADATA`, `initLogos`) is generated from `src/my_module_impl.h`.
+You write only the impl class. Everything else is generated from
+`src/my_module_impl.h` into `generated_code/`: `my_module.lidl` (the contract),
+`my_module_cdylib_glue.{h,cpp}` (the Qt plugin, `Q_PLUGIN_METADATA` + `onInit`)
+and `my_module_module_impl.cpp` / `my_module_types.h` (the Qt-free C ABI).
+The old `*_interface.h` / `*_plugin.{h,cpp}` names are no longer emitted.
 Module code is Qt-free — use `std::string`.
 
 ### Impl Header (`src/my_module_impl.h`)

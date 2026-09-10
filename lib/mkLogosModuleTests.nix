@@ -13,7 +13,7 @@
 #     flakeInputs = inputs;
 #     mockCLibs = ["gowalletsdk"];  # optional
 #   };
-{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-test-framework }:
+{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol, logos-qt-sdk, logos-plugin-qt ? null, logos-view-module, logos-test-framework }:
 
 let
   modulePreConfigure = import ./modulePreConfigure.nix { inherit lib; };
@@ -51,19 +51,107 @@ in
 let
   forAllSystems = f: lib.genAttrs common.systems (system: f system);
 
-  # Parse config if available (defaults must satisfy parseModuleConfig shape consumers)
-  config = if configFile != null
-    then parseMetadata.parseModuleConfig (builtins.readFile configFile)
-    else parseMetadata.parseModuleConfig ''{"name":"unknown","version":"0.0.0"}'';
+  # Parse config if available (defaults must satisfy parseModuleConfig shape consumers).
+  #
+  # Per-system, because everything this file reads off it — nix_packages.runtime,
+  # dependencies, go_static_lib_names — is platform-keyable, and all of it is
+  # read inside `checks` below where the target IS known. The literal fallback
+  # takes a platform too: it can never contain a `platforms` block, but leaving
+  # one call site on the old shape would leave a permanently-unmigrated example
+  # in the tree for the next person to copy.
+  configFor = system: parseMetadata.parseModuleConfig {
+    platform = parseMetadata.platformForSystem system;
+    json = if configFile != null
+      then builtins.readFile configFile
+      else ''{"name":"unknown","version":"0.0.0"}'';
+  };
+
+  # ── The document the ARTIFACT carries ─────────────────────────────────────
+  #
+  # `configFile` is the SOURCE, overlays unapplied. Ship it and a platform-keyed
+  # field is resolved for the BUILD and not for the artifact: the loader, lgpm
+  # and the .lgx manifest all read the base answer. That gap is why
+  # `dependencies` was a refused overlay key.
+  #
+  # Written from `_raw` — the RESOLVED tree, which keeps the object entry form
+  # that carries an installer's version/signer constraints. The normalised
+  # `config` would flatten those to names.
+  #
+  # Null for a module with no `platforms` anywhere: there is nothing to resolve,
+  # and the source file goes on reaching the artifact byte-identically.
+  # configFile is optional here (the literal fallback above), and a module with
+  # no metadata file has nothing to resolve.
+  hasPlatformOverlays = configFile != null &&
+    (let j = builtins.fromJSON (builtins.readFile configFile);
+     in (j ? platforms) || (builtins.isAttrs (j.nix or null) && (j.nix ? platforms)));
+  resolvedMetadataFileFor = pkgs: system:
+    if !hasPlatformOverlays then null
+    else pkgs.writeText "metadata.json" (builtins.toJSON (configFor system)._raw);
+  # The SOURCE a plugin build sees, with the resolved document already in it.
+  #
+  # Staging it from preConfigure is too late: logos-plugin-qt splices that hook
+  # at the END of its generation script, after the umbrella generator has
+  # already read ./metadata.json (buildPlugin.nix runs `${generatorCalls}` and
+  # only then `${preConfigure}`). A dependency added by an overlay would link
+  # and then have no `modules()` member — exactly the failure the refusal
+  # warned about. Putting it in the source instead lands it before anything
+  # reads it, and needs no change on the backend side.
+  srcFor = pkgs: system:
+    let f = resolvedMetadataFileFor pkgs system;
+    in if f == null then src
+       else pkgs.runCommand "logos-module-tests-src-resolved" {} ''
+         cp -R --no-preserve=mode,ownership ${src} $out
+         cp --no-preserve=mode ${f} $out/metadata.json
+       '';
+
+
 
   checks = forAllSystems (system:
     let
-      pkgs = import nixpkgs { inherit system; };
+      pkgs = common.mkPkgs system;
+      config = configFor system;
       logosSdk = logos-cpp-sdk.packages.${system}.default;
+      # Build-platform half of the SDK. logos-cpp-generator is invoked by BARE
+      # NAME from a build phase (logos-plugin-qt/lib/buildPlugin.nix:145), so it
+      # must run on the builder. Under cross, packages.x86_64-windows.default
+      # carries no runnable generator at all -- logos-cpp-sdk/nix/bin.nix:39
+      # silently skips the mingw .exe -- hence "command not found".
+      #
+      # `logosSdk` deliberately stays TARGET-typed: it is ALSO the header and
+      # CMake-package root passed to LOGOS_CPP_SDK_ROOT, and those must keep
+      # coming from the Windows set. Splitting the two roles is the whole point;
+      # pointing the headers at the build system would produce a build that
+      # SUCCEEDS while linking the wrong architecture.
+      #
+      # buildSystemFor is the identity on every native system, so this is a
+      # no-op off the Windows target.
+      logosSdkBuild = logos-cpp-sdk.packages.${common.buildSystemFor system}.default;
       logosQtSdk = logos-qt-sdk.packages.${system}.default;
+      # The Qt HOST RUNTIME a test binary links (LogosAPI and the provider
+      # objects). logos-test-framework's LogosTest.cmake takes it from
+      # LOGOS_QT_HOST_ROOT and from nowhere else; LOGOS_QT_SDK_ROOT is passed
+      # alongside purely for the Qt-typed headers logos-qt-sdk alone ships.
+      logosQtHost = logos-plugin-qt.packages.${system}.logos-qt-host;
       # The Qt glue generator (universal/cdylib/ui backends) — Qt code is
       # the Qt layer's product; logos-cpp-generator keeps Qt-free outputs.
-      logosQtGenerator = logos-qt-sdk.packages.${system}.logos-qt-generator;
+      logosQtGenerator = logos-qt-sdk.packages.${common.buildSystemFor system}.logos-qt-generator;
+      # The cdylib Qt-plugin glue generator lives in logos-plugin-qt (the Qt
+      # plugin BACKEND owns the glue; the SDK does not). logos-qt-sdk still
+      # ships an older copy of the SAME emitter, and calling that one is not a
+      # compile error — it silently emits STALE glue. That is how a
+      # host-services grant went undelivered while every build stayed green.
+      logosQtHostGenerator =
+        logos-plugin-qt.packages.${common.buildSystemFor system}.logos-qt-host-generator;
+      # The VIEW plugin glue generator (`--backend ui`), from logos-view-module.
+      # Needed HERE too, not just in the plugin build: compose below runs
+      # autoCodegen, which for a `type: ui_qml` module is the ui backend. Before
+      # the emitter moved, this path got it for free from logos-qt-generator.
+      logosViewGenerator =
+        logos-view-module.packages.${common.buildSystemFor system}.logos-view-generator;
+      # Same pin as the generator: the emitted glue calls into this header, so
+      # the two must never come from different revisions. See buildCppPlugin.nix.
+      logosViewInclude =
+        logos-view-module.packages.${common.buildSystemFor system}.include;
       logosProtocolPkg = logos-protocol.packages.${system}.default;
       testFramework = logos-test-framework.packages.${system}.default;
 
@@ -146,15 +234,17 @@ let
         pname = "logos-${config.name}-tests";
         version = config.version;
 
-        src = src;
+        src = srcFor pkgs system;
 
         nativeBuildInputs = with pkgs; [
           cmake
           ninja
           pkg-config
           qt6.wrapQtAppsNoGuiHook
-          logosSdk
+          logosSdkBuild
           logosQtGenerator
+          logosQtHostGenerator
+          logosViewGenerator
         ] ++ extraBuildInputs;
 
         buildInputs = with pkgs; [
@@ -162,6 +252,7 @@ let
           qt6.qtremoteobjects
           logosSdk
           logosQtSdk
+          logosQtHost
           logosProtocolPkg
           testFramework
         ] ++ runtimePkgs;
@@ -193,7 +284,9 @@ let
           cmake ../${testDirName} \
             -DLOGOS_CPP_SDK_ROOT=${logosSdk} \
             -DLOGOS_QT_SDK_ROOT=${logosQtSdk} \
+            -DLOGOS_QT_HOST_ROOT=${logosQtHost} \
             -DLOGOS_PROTOCOL_ROOT=${logosProtocolPkg} \
+            -DLOGOS_VIEW_INCLUDE_DIR=${logosViewInclude} \
             -DLOGOS_TEST_FRAMEWORK_ROOT=${testFramework} \
             -DCMAKE_MODULE_PATH=${testFramework}/cmake \
             ${lib.optionalString (externalLibRpath != "") "-DCMAKE_INSTALL_RPATH=${externalLibRpath} -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"} \

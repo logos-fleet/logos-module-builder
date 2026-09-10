@@ -3,7 +3,11 @@
 { assertEq, assertBool, assertHasAttr, parseMetadata, builderRoot }:
 
 let
-  parse = parseMetadata.parseModuleConfig;
+  # A fixed platform: nothing in this file is platform-keyed, so pinning one
+  # keeps every assertion below reading exactly as it did when
+  # parseModuleConfig took the JSON alone.
+  linuxX86 = { os = "linux"; architecture = "x86_64"; abi = "gnu"; };
+  parse = json: parseMetadata.parseModuleConfig { inherit json; platform = linuxX86; };
 
   # Read and parse each template's metadata.json
   minimalMeta = parse (builtins.readFile (builderRoot + "/templates/minimal-module/metadata.json"));
@@ -39,7 +43,10 @@ in [
   (assertEq "template ui: name" uiMeta.name "ui_example")
   (assertEq "template ui: type" uiMeta.type "ui_qml")
   (assertEq "template ui: main" uiMeta.main "ui_example_plugin")
-  (assertEq "template ui: icon" uiMeta.icon null)
+  # Templates ship a 256x256 placeholder so a freshly scaffolded ui_qml
+  # module builds green: `icon` is required for ui_qml at manifest 0.4.0+,
+  # and the bundler hard-fails a missing or non-conforming one.
+  (assertEq "template ui: icon" uiMeta.icon "src/icons/icon.png")
   (assertEq "template ui: universal authoring" uiMeta.interface "universal")
   (assertEq "template ui: codegen rep" uiMeta.codegen.rep "src/ui_example.rep")
 
@@ -47,6 +54,7 @@ in [
   (assertEq "template qml: name" uiQmlMeta.name "ui_qml_example")
   (assertEq "template qml: type" uiQmlMeta.type "ui_qml")
   (assertEq "template qml: view" uiQmlMeta.view "Main.qml")
+  (assertEq "template qml: icon" uiQmlMeta.icon "src/icons/icon.png")
   # QML-only template has no C++ backend, so it stays on the legacy (non-universal) path.
   (assertEq "template qml: legacy authoring" uiQmlMeta.interface "legacy")
 

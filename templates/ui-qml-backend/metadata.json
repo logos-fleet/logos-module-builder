@@ -7,9 +7,11 @@
   "category": "example",
   "description": "A C++ UI module (universal backend) with QML view (process-isolated)",
   "main": "ui_example_plugin",
-  "icon": null,
+  "icon": "src/icons/icon.png",
   "view": "qml/Main.qml",
   "dependencies": [],
+  "provides": [],
+  "uses": [],
   "codegen": { "rep": "src/ui_example.rep" },
 
   "nix": {
