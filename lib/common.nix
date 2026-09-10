@@ -137,9 +137,17 @@ let
   # EXIST and fail only when forced, which is the shape of bug that reaches a
   # consumer. mkLogosModule merges a mobile-only attrset (just `bare`) onto
   # `packages` instead, the same way logos-liblogos and logos-basecamp do.
+  #
+  # A logos-nix WITHOUT the mobile helpers is the expected off state, not an
+  # error: `nix flake update` walking the input back to an upstream rev is all
+  # it takes (see the note on the input in flake.nix). Everything mobile then
+  # degrades to empty rather than throwing on an attribute that is not there,
+  # which is what this one predicate buys.
+  hasMobileSupport = logos-nix != null && logos-nix ? lib.mkIosPkgs;
+
   mobileSystems =
-    if logos-nix == null || !(logos-nix ? lib.mkIosPkgs) then [ ]
-    else [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ];
+    if hasMobileSupport then [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ]
+    else [ ];
 
   # The build platform each mobile target is produced FROM.
   #
@@ -148,20 +156,24 @@ let
   # a cross derivation's `system` is its BUILD platform — `packages.aarch64-android`
   # built from x86_64-linux cannot be realised on a Mac even though the Mac can
   # build the identical closure. Hence the parameter, and hence
-  # `mkMobilePackages` on mkLogosModule's result for a caller that needs the
-  # other one.
+  # `legacyPackages.<buildSystem>.mobile` on mkLogosModule's result for a
+  # caller that needs the other one.
+  androidBuildSystems =
+    if hasMobileSupport then logos-nix.lib.androidBuildSystems else [ ];
+
   defaultAndroidBuildSystem =
-    if logos-nix == null then "x86_64-linux"
-    else lib.head logos-nix.lib.androidBuildSystems;
+    if androidBuildSystems == [ ] then "x86_64-linux"
+    else lib.head androidBuildSystems;
 
   mobileBuildSystemFor = androidBuildSystem: target:
     if target == "aarch64-android" then androidBuildSystem else "aarch64-darwin";
 
   mkMobilePkgs = { target, androidBuildSystem ? defaultAndroidBuildSystem }:
     let buildSystem = mobileBuildSystemFor androidBuildSystem target; in
-    if logos-nix == null then
-      throw ("logos-module-builder: targeting ${target} requires the logos-nix "
-             + "input to be threaded into the builder lib.")
+    if !hasMobileSupport then
+      throw ("logos-module-builder: targeting ${target} requires a logos-nix "
+             + "input that carries the mobile helpers (lib.mkIosPkgs, "
+             + "lib.mkAndroidPkgs, lib.androidBuildSystems).")
     else if target == "aarch64-android" then
       logos-nix.lib.mkAndroidPkgs { inherit buildSystem; }
     else
@@ -292,9 +304,8 @@ let
 
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
-  inherit mobileSystems mkMobilePkgs forAllMobileSystems defaultAndroidBuildSystem;
-  androidBuildSystems =
-    if logos-nix == null then [ ] else logos-nix.lib.androidBuildSystems;
+  inherit mobileSystems mkMobilePkgs forAllMobileSystems;
+  inherit androidBuildSystems defaultAndroidBuildSystem;
   inherit classifyConcreteDeps;
 
   inherit collectAllModuleDeps;

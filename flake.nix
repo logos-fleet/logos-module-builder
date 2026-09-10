@@ -338,6 +338,15 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
         };
+        # The Bare-module gate: deliberately-wrong artifacts (Qt-linked, an
+        # ABI export missing, the logos-protocol archive carried) must be
+        # rejected by name. No module build — just the gate and nm/otool.
+        bare-gate = import ./tests/test-bare-gate.nix {
+          inherit pkgs;
+          gateScript = ./scripts/logos-bare-gate.sh;
+          # The same published export list the gate itself reads.
+          moduleImplAbi = lib.moduleImplAbiFor system;
+        };
       }
       # The mobile Bare artifacts: an iOS embedded framework (device and
       # simulator) and an Android .so. aarch64-darwin ONLY -- iOS cannot be
@@ -348,17 +357,6 @@
           inherit pkgs;
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
-        };
-      }
-      // {
-        # The Bare-module gate: deliberately-wrong artifacts (Qt-linked, an
-        # ABI export missing, the logos-protocol archive carried) must be
-        # rejected by name. No module build — just the gate and nm/otool.
-        bare-gate = import ./tests/test-bare-gate.nix {
-          inherit pkgs;
-          gateScript = ./scripts/logos-bare-gate.sh;
-          # The same published export list the gate itself reads.
-          moduleImplAbi = lib.moduleImplAbiFor system;
         };
       });
 

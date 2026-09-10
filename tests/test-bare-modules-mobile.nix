@@ -95,7 +95,22 @@ in assert qmlHasNoMobileBare; pkgs.runCommand "bare-modules-mobile-tests" {
     || { echo "FAIL: Android SONAME is '$soname', not libbare_counter_bare.so"; exit 1; }
   # The whole reason the Android name is decorated at all.
   case "$(basename "$and_so")" in lib*.so) ;; *) echo "FAIL: not lib*.so"; exit 1 ;; esac
-  echo "PASS: Android — aarch64 ELF, lib*.so, SONAME matches"
+
+  # WHERE ITS lp_* COME FROM. On Android a DT_NEEDED on the host's protocol
+  # soname is the only mechanism bionic offers a dlopen'd library for reaching
+  # an app library's symbols, so its absence is not a missing nicety -- the
+  # module loads nowhere. It is recorded by linking an EMPTY .so carrying that
+  # soname, so the gate's "every lp_* stays UNDEFINED" still holds and is
+  # re-asserted here against the shipped bytes.
+  needed=$(llvm-readelf -d "$and_so" | awk -F'[][]' '/NEEDED/ {print $2}')
+  grep -qx liblogos_protocol.so <<< "$needed" \
+    || { echo "FAIL: Android artifact does not name liblogos_protocol.so in DT_NEEDED."
+         echo "      NEEDED was:"; printf '        %s\n' $needed; exit 1; }
+  if llvm-nm -D --defined-only "$and_so" | grep -q ' lp_'; then
+    echo "FAIL: the DT_NEEDED brought protocol CODE along; lp_* must stay undefined"
+    exit 1
+  fi
+  echo "PASS: Android — aarch64 ELF, lib*.so, SONAME matches, NEEDED liblogos_protocol.so with no lp_* defined"
 
   {
     echo "ios-sim:     ${iosSim}"

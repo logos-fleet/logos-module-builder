@@ -1237,8 +1237,9 @@ let
   # x86_64-linux and cannot be REALISED on a Mac even though the Mac builds the
   # identical closure. Same shape (and same reason) as logos-basecamp's
   # `legacyPackages.<buildSystem>.mobile`.
-  mobileBareLegacyPackages = lib.genAttrs
-    (if common.mobileSystems == [ ] then [ ] else common.androidBuildSystems)
+  # `common.androidBuildSystems` is [] exactly when the mobile targets are off,
+  # so this is empty in the same breath `packages` loses its mobile keys.
+  mobileBareLegacyPackages = lib.genAttrs common.androidBuildSystems
     (androidBuildSystem: { mobile = mobileBareFor { inherit androidBuildSystem; }; });
 
   # LGX package outputs (nix-bundle-lgx provided by the builder)

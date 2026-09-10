@@ -8,11 +8,11 @@
 # take the `logos_bare_module()` path in LogosModule.cmake and return before it
 # looks for Qt at all, which is why neither Qt nor logos-qt-sdk appears below.
 #
-# ONE FUNCTION, FOUR HOST SHAPES. The same call produces the native .so/.dylib,
-# the iOS embedded FRAMEWORK BUNDLE and the Android .so; which one comes out is
-# read off `pkgs.stdenv.hostPlatform`, never passed in, so a caller cannot ask
-# for an iOS framework from a Linux package set. The mobile shapes differ from
-# the native one in exactly three ways and no more:
+# ONE FUNCTION, FOUR HOST SHAPES: the native .so, the native .dylib, the iOS
+# embedded FRAMEWORK BUNDLE and the Android .so. Which one comes out is read off
+# `pkgs.stdenv.hostPlatform`, never passed in, so a caller cannot ask for an iOS
+# framework from a Linux package set. The mobile shapes differ from the native
+# one in exactly three ways and no more:
 #
 #   * iOS compiles through Xcode's clang (pkgs.xcodeClang, a `__noChroot`
 #     derivation — ADR 0002) because nix's cc-wrapper cannot target iOS;
@@ -66,11 +66,11 @@ let
   # both still answer yes.
   installedName = if isAndroid then "lib${stem}.so" else builtName;
 
-  appleSdk =
-    if !isIos then null
-    else if host.darwinPlatform == "ios-simulator" then "iphonesimulator"
-    else "iphoneos";
-  iosPlatformName = if appleSdk == "iphonesimulator" then "iPhoneSimulator" else "iPhoneOS";
+  # The device and the simulator share a triple; `darwinPlatform` is what
+  # separates them, and it is the only thing either name below depends on.
+  isIosSimulator = isIos && host.darwinPlatform == "ios-simulator";
+  appleSdk = if isIosSimulator then "iphonesimulator" else "iphoneos";
+  iosPlatformName = if isIosSimulator then "iPhoneSimulator" else "iPhoneOS";
   # Matches nix/ios/cross-overlay.nix's iosDeploymentTarget: the floor every
   # hand-rolled iOS artifact in this stack targets.
   iosDeploymentTarget = "17.0";
@@ -174,7 +174,8 @@ let
   # Built in the derivation rather than as a separate one: it has to be
   # produced by the SAME cross toolchain that links the module, and it holds no
   # bytes worth caching -- an empty .so is 8 KB of ELF header.
-  androidHostAbiStub = lib.optionalString isAndroid ''
+  # Reached only through the `lib.optionalAttrs isAndroid` at the bottom.
+  androidHostAbiStub = ''
     : > logos_host_abi_stub.c
     $CC -shared -fPIC -nostdlib -o logos_host_abi_stub.so logos_host_abi_stub.c \
       -Wl,-soname,${androidHostAbiSoname}
