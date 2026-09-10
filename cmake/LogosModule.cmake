@@ -495,6 +495,23 @@ function(logos_bare_module)
         target_link_libraries(${_BARE_TARGET} PRIVATE ${lib})
     endforeach()
 
+    # Where the host's `lp_*` come from, on the one platform that needs telling.
+    #
+    # LOGOS_MODULE_BARE_LINK_HOST_ABI names an EMPTY shared object whose SONAME
+    # is the host's logos-protocol image. `--no-as-needed` makes the linker
+    # record it as a DT_NEEDED even though no symbol is taken from it, so the
+    # artifact says where its undefined `lp_*` resolve without carrying a byte
+    # of protocol code. Android's loader has no other mechanism -- see
+    # lib/buildBareModule.nix for the measurement. Empty everywhere else.
+    if(LOGOS_MODULE_BARE_LINK_HOST_ABI)
+        if(NOT EXISTS "${LOGOS_MODULE_BARE_LINK_HOST_ABI}")
+            message(FATAL_ERROR
+                "LOGOS_MODULE_BARE_LINK_HOST_ABI does not exist: ${LOGOS_MODULE_BARE_LINK_HOST_ABI}")
+        endif()
+        target_link_options(${_BARE_TARGET} PRIVATE
+            -Wl,--no-as-needed ${LOGOS_MODULE_BARE_LINK_HOST_ABI} -Wl,--as-needed)
+    endif()
+
     # lp_* stays undefined: that IS the Bare shape. ELF allows undefined symbols
     # in a shared object by default; Mach-O has to be told.
     if(APPLE)

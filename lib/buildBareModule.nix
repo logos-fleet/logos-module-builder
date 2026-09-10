@@ -122,6 +122,31 @@ let
 
   mkDerivation = if isIos then pkgs.xcodeClang.mkDerivation else pkgs.stdenv.mkDerivation;
 
+  # ── how an Android Bare module reaches the host's lp_* ─────────────────────
+  # THE SONAME OF THE HOST'S logos-protocol IMAGE, recorded as a DT_NEEDED.
+  #
+  # On every other platform "the host image supplies lp_*" needs no spelling:
+  # a Mach-O says it with `-undefined dynamic_lookup`, and on Linux the host is
+  # an executable, which the loader always searches. Android has neither.
+  # Bionic resolves a dlopen'd library's undefined symbols against its own
+  # DT_NEEDED closure and the linker namespace's GLOBAL group -- and an app's
+  # own libraries are never in the global group, because everything an Android
+  # app loads goes through System.load(), a LOCAL dlopen into the classloader
+  # namespace. Re-opening the protocol image with RTLD_GLOBAL does not promote
+  # it. Measured on an SM-G990B, both with and without RTLD_NOLOAD: the promote
+  # call succeeds and the module still fails with
+  #   dlopen failed: cannot locate symbol "lp_token_save"
+  #
+  # So DT_NEEDED is not one option among several here, it is the only mechanism
+  # the platform has.
+  #
+  # HOW, without linking any protocol code: the module is linked against an
+  # EMPTY shared object carrying this soname. `--no-as-needed` makes the linker
+  # record the dependency even though not one symbol is taken from it, which is
+  # the whole trick -- every `lp_*` stays UNDEFINED in the artifact, so the gate
+  # is as strict as it ever was, and the ELF simply names where they come from.
+  androidHostAbiSoname = "liblogos_protocol.so";
+
   # find_package(logos-cpp-sdk) does find_dependency(nlohmann_json), and under
   # cross neither prefix is on a path CMake searches by default: an iOS
   # toolchain re-roots find_package at the SDK sysroot. Name both explicitly
@@ -145,6 +170,16 @@ let
     "-DCMAKE_OSX_ARCHITECTURES=${host.darwinArch}"
     "-DCMAKE_OSX_DEPLOYMENT_TARGET=${iosDeploymentTarget}"
   ];
+
+  # Built in the derivation rather than as a separate one: it has to be
+  # produced by the SAME cross toolchain that links the module, and it holds no
+  # bytes worth caching -- an empty .so is 8 KB of ELF header.
+  androidHostAbiStub = lib.optionalString isAndroid ''
+    : > logos_host_abi_stub.c
+    $CC -shared -fPIC -nostdlib -o logos_host_abi_stub.so logos_host_abi_stub.c \
+      -Wl,-soname,${androidHostAbiSoname}
+    cmakeFlagsArray+=("-DLOGOS_MODULE_BARE_LINK_HOST_ABI=$PWD/logos_host_abi_stub.so")
+  '';
 
   installPhase =
     if isIos then ''
@@ -185,7 +220,7 @@ let
     if isIos then "$out/Library/Frameworks/${stem}.framework"
     else "$out/lib/${installedName}";
 
-in mkDerivation {
+in mkDerivation ({
   pname = "logos-${config.name}-bare";
   version = config.version;
 
@@ -248,3 +283,13 @@ in mkDerivation {
     platforms = platforms.unix;
   };
 }
+# CONDITIONAL, and INSIDE the argument set. `preConfigure = androidHostAbiStub`
+# unconditionally would replace pkgs.xcodeClang.mkDerivation's own preConfigure,
+# which exports CC/CXX/AR from xcrun because nix's cc-wrapper cannot target iOS
+# — measured as "CMAKE_CXX_COMPILER not set" on the iOS leg. And `//` applied to
+# mkDerivation's RESULT instead of its argument silently adds an attribute to
+# the derivation that no build phase ever reads, which is how this first shipped
+# with no DT_NEEDED and no diagnostic anywhere.
+// lib.optionalAttrs isAndroid {
+  preConfigure = androidHostAbiStub;
+})

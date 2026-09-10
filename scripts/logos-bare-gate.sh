@@ -168,10 +168,24 @@ fail_each "logos_protocol internal symbol in a Bare module" "$PROTOCOL_INTERNAL_
 
 # ── 4. no Qt / logos-protocol shared library in the load commands ───────────
 LIB_RE='libQt|Qt[A-Z][A-Za-z]*\.framework|libQt[0-9]|logos_protocol|logos-protocol|logos_qt_sdk|logos-qt-sdk'
+
+# THE ONE PERMITTED NAME, and only on ELF.
+#
+# "The host image supplies lp_*" needs no spelling on Mach-O (`-undefined
+# dynamic_lookup`) or on Linux (the host is an executable, always searched).
+# Android has neither: bionic resolves a dlopen'd library against its own
+# DT_NEEDED closure and the namespace's GLOBAL group, and an app's libraries
+# are never in the global group. A DT_NEEDED on the host's protocol soname is
+# the only mechanism the platform offers, and it carries NO CODE -- clause 3
+# above still requires every lp_* to be UNDEFINED, which is what "protocol-free"
+# actually means. A Qt library, a logos-qt-sdk, or a DEFINED lp_* is refused
+# exactly as before.
+HOST_ABI_SONAME='liblogos_protocol.so'
 case "$FORMAT" in
     macho) linked=$("$OTOOL" -L "$ARTIFACT" 2>/dev/null | tail -n +2 | awk '{print $1}') ;;
     *)     linked=$("$READELF" -d "$ARTIFACT" 2>/dev/null \
-                     | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }') ;;
+                     | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }' \
+                     | grep -vFx "$HOST_ABI_SONAME") ;;
 esac
 fail_each "Bare module links a forbidden library" "$LIB_RE" "$linked"
 
