@@ -2,13 +2,12 @@
   description = "Logos Module Builder - Shared library for building Logos modules with minimal boilerplate";
 
   inputs = {
-    # LOCKED TO THE logos-fleet FORK, not to this URL: the mobile Bare module
-    # outputs (lib/mobileBare.nix) need logos-nix's lib.mkMobileTargets /
-    # lib.mobileRustTargets, the iOS and Android cross overlays' four
-    # logos{Rust,Nim}Cross* attributes, and logosAndroidDtNeededGate -- none of
-    # which are upstream yet. `nix flake update` would silently move this back
-    # to logos-co and `packages.aarch64-ios.bare` would stop evaluating.
-    # Re-pin with
+    # LOCKED TO THE logos-fleet FORK, not to this URL. The mobile Bare outputs
+    # (`packages.aarch64-ios.bare` and friends) call logos-nix.lib.mkIosPkgs /
+    # mkAndroidPkgs / androidBuildSystems / mobileRustTargets and, on Android,
+    # the target set's `logosRustCrossSetup` and `logosAndroidDtNeededGate` --
+    # none of which are upstream yet, and `nix flake update` would silently walk
+    # this back to logos-co and take common.mobileSystems down to []. Re-pin with
     #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     # Optional newer rustc for crates whose deps out-pace the nixpkgs rustc
@@ -100,6 +99,16 @@
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-qt.inputs.logos-nix.follows = "logos-nix";
     logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
+    # ONE LIDL GRAMMAR, because this builder runs both ends of it on the same
+    # file: logos-cpp-generator WRITES a module's .lidl contract, and
+    # logos-qt-host-generator from here READS it back in the very next step.
+    # Locked apart, the writer emitted `optional_depends` (logos-cpp-sdk
+    # 5ef6ae0) and the reader had never heard of the token, so every module
+    # declaring an optional dependency failed to build — with the error in the
+    # PARSER, three repos away from the pin that caused it. This is the same
+    # reasoning as the logos-protocol follows above, on the other artefact the
+    # two generators share.
+    logos-plugin-qt.inputs.logos-lidl.follows = "logos-cpp-sdk/logos-lidl";
     # Core modules (type: core) use this backend — defaults to Qt, swappable
     # later. It MUST stay on the same rev as logos-plugin-qt above: the two
     # inputs are selected per module TYPE, they both carry the Qt host runtime,
@@ -108,6 +117,7 @@
     # logos-plugin-qt above now that logos-plugin-qt#19 has merged.
     logos-plugin-core.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-core.inputs.logos-protocol.follows = "logos-protocol";
+    logos-plugin-core.inputs.logos-lidl.follows = "logos-cpp-sdk/logos-lidl";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
     nix-bundle-logos-module-install.url = "github:logos-co/nix-bundle-logos-module-install";
     # Host shell used by `nix run` / integration tests for ui_qml modules.
@@ -350,14 +360,12 @@
           moduleImplAbi = lib.moduleImplAbiFor system;
         };
       }
-      # The same three shapes cross-built for iOS and Android. Not folded into
-      # `bare-modules` above: it needs Xcode for the iOS half and the NDK for
-      # the Android one, so on a system that has neither there is nothing to
-      # check rather than something to skip silently. aarch64-darwin builds all
-      # three targets; x86_64-linux builds Android only (only a Mac can produce
-      # an iOS image at all).
-      // nixpkgs.lib.optionalAttrs (builtins.elem system [ "aarch64-darwin" "x86_64-linux" ]) {
-        mobile-bare = import ./tests/test-mobile-bare.nix {
+      # The mobile Bare artifacts: an iOS embedded framework (device and
+      # simulator) and an Android .so. aarch64-darwin ONLY -- iOS cannot be
+      # cross-compiled from anywhere else, and putting this key on the Linux
+      # systems would give `nix flake check` a derivation it can never realise.
+      // nixpkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+        bare-mobile = import ./tests/test-bare-modules-mobile.nix {
           inherit pkgs;
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;

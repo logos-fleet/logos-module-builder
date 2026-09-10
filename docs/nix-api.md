@@ -256,8 +256,8 @@ Returns an attribute set with:
   linked in.
 
 It is the build shape shared by the iOS embedded framework and the Wasm host.
-`<name>_bare.dylib` / `<name>_bare.so` under `lib/`, for the native system and
-for the three mobile targets below.
+Desktop targets: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`; the
+mobile targets are below.
 
 Who gets one: exactly the modules `parseMetadata` marks
 `packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
@@ -296,67 +296,80 @@ load-bearing rather than stylistic: nixpkgs computes `doInstallCheck &&
 buildPlatform.canExecute hostPlatform`, so under any cross build the phase is
 skipped without a word. This gate reads a symbol table and never runs the
 artifact, so there is nothing for that rule to protect against here — and the
-shape it would otherwise produce is the worst one available, three mobile Bare
-modules that report themselves gated and were not.
+shape it would otherwise produce is the worst one available, a mobile Bare
+module that reports itself gated and was not.
 
-#### Mobile: `packages.aarch64-ios{,-simulator}.bare`, `packages.aarch64-android.bare`
+The gate picks its reader off the ARTIFACT's magic bytes, not off `uname`, so
+it reads an Android `.so` correctly while running on a Mac; hand it a
+`.framework` directory and it resolves the Mach-O inside.
 
-The Bare module is the ONE module output that crosses to mobile, precisely
-because it carries no Qt: an iOS app loads an embedded framework and an APK
-loads a `.so`, neither of which is a Qt plugin, so the other twenty outputs
-(the plugin, `lgx`, `install`, `unit-tests`, the `ui_qml` view) have no mobile
-shape at all. The three mobile pseudo-systems are therefore keyed onto
-`packages` the way `x86_64-windows` is, rather than added to the builder's
-`systems` list:
+#### The mobile keys
+
+The same `bare` output, cross-compiled:
 
 ```bash
-nix build .#packages.aarch64-ios.bare            # arm64-apple-ios, device
-nix build .#packages.aarch64-ios-simulator.bare  # arm64-apple-ios-simulator
-nix build .#packages.aarch64-android.bare        # arm64-v8a, API 28
+nix build .#packages.aarch64-ios.bare            # iPhone / iPad
+nix build .#packages.aarch64-ios-simulator.bare  # the simulator
+nix build .#packages.aarch64-android.bare        # arm64-v8a
 ```
 
-What crosses and what does not:
+These three keys are **pseudo-systems** (a cross derivation's `system` is its
+BUILD platform) and they carry `bare` and nothing else — there is no Qt plugin
+host on a phone, which is the reason the Bare module exists. They appear only
+when the builder's `logos-nix` input has the mobile targets.
 
-- `generate` is **source**, and is taken from the build platform unchanged.
-  Its one target-specific corner is `lib/`, where the generate step staged a
-  build-platform Rust archive; the cross archive replaces it.
-- logos-cpp-sdk and logos-protocol are consumed as **headers** by a bare build
-  (`logos_bare_module()` adds include directories and links neither), so the
-  build-platform packages are correct and nothing has to be cross-built.
-- A `codegen.rust` module's crate **is** recompiled for the target, with a
-  rust-overlay toolchain that runs on the builder and has the target's std
-  added (`logos-nix`'s `lib.mobileRustTargets` names the cargo triple). The
-  toolchain wiring — linker, `cc-rs` `CC_`/`AR_`/`CFLAGS_`, the SDK — comes
-  from the target package set as `pkgs.logosRustCrossSetup`, contributed by
-  both mobile overlays under the same name.
+| target | artifact |
+|---|---|
+| `aarch64-ios`, `aarch64-ios-simulator` | `Library/Frameworks/<name>_bare.framework/` — a flat embedded framework with an `Info.plist`, install_name `@rpath/<name>_bare.framework/<name>_bare`. Copy it into `<App>.app/Frameworks/` with Code Sign On Copy. |
+| `aarch64-android` | `lib/lib<name>_bare.so`, SONAME to match — an APK carries only `lib*.so`. |
 
-An Android derivation's `system` attribute is its BUILD platform, so
-`packages.aarch64-android.*` is pinned to x86_64-linux and cannot be realised
-on a Mac even though aarch64-darwin builds the identical closure. To verify it
-from a Mac, ask for that build platform explicitly:
+`_bare` survives into the installed filename on every platform on purpose:
+liblogos identifies a Bare module by that stem suffix.
 
-```nix
-(mkLogosModule { ... }).mobileBarePackagesFor { androidBuildSystem = "aarch64-darwin"; }
-```
+The generated sources come from the BUILD platform's `generate` output: a code
+generator is a host tool, so the mobile artifact is a cross COMPILE of exactly
+the tree the native one compiles. Its one target-specific corner is `lib/`,
+where the generate step staged a build-platform archive.
 
-**What does not cross yet.** A module declaring `nix.external_libraries` is
-REFUSED a mobile bare output, by name, at eval. Those libraries are staged into
-`lib/` as build-platform images by the module's own `generate` step, and
-nothing here can recompile them — each comes from its own flake, which would
-have to publish a package for the target. (A `codegen.rust` core is different
-and does cross: the crate is rebuilt for the target here.) Left to the linker
-it surfaces as `ld: building for 'iOS-simulator', but linking in dylib ... built
-for 'macOS'` forty lines into a link command, naming neither the library's
-owner nor the fix.
+**A `codegen.rust` core crosses.** The crate is recompiled for the target and
+staged over the build-platform archive `generate` left in `lib/`, so a Rust
+module has the same three mobile artifacts a C++ one does. The toolchain is a
+rust-overlay one that RUNS on the builder with the target's std added — nixpkgs'
+cross `rustPlatform` would have to come from the target package set, which for
+iOS has no working stdenv at all. `logos-nix`'s `lib.mobileRustTargets` names
+the cargo triple, and the linker / `cc-rs` / SDK wiring arrives as
+`pkgs.logosRustCrossSetup`, contributed by both mobile overlays under the same
+name. `packages.<buildSystem>.rust-crate-src` is published for this: the
+scaffold is generated once on the build platform and all four targets compile
+that same crate.
 
-**The Android gate.** On top of the Bare-module gate, every
-`aarch64-android` artifact is run through logos-nix's
-`logos-android-dt-needed-gate`: a `DT_NEEDED` soname that is neither shipped
-beside the artifact nor guaranteed by Android at the app's API level fails the
-build rather than the phone (where it surfaces as an `UnsatisfiedLinkError`
-naming one soname and none of the reason). `libc++_shared.so` is allowed by
-name, because Qt's Android platform refuses any other STL and the Native
-container's APK therefore packages it.
+**What still does not cross**, refused by name at eval rather than left to the
+linker:
+
+- a module declaring `nix.external_libraries`. Those are staged into `lib/` as
+  build-platform images by the module's own `generate` step and nothing here
+  can recompile them — each comes from its own flake, which has to publish a
+  package for the target and have it staged in place. Left to the linker it
+  surfaces as `ld: building for 'iOS-simulator', but linking in dylib ... built
+  for 'macOS'` forty lines into a link command, naming neither the library's
+  owner nor the fix;
+- a Go core, for the same reason with no cross toolchain wired in.
+
+And one platform fact: `packages.aarch64-android` is built from logos-nix's
+canonical Android build platform (`x86_64-linux`), which a Mac cannot realise.
+For the other one use `legacyPackages.<buildSystem>.mobile.aarch64-android.bare`
+— e.g. `legacyPackages.aarch64-darwin.mobile.aarch64-android.bare`.
+
+**The Android gate.** On top of the Bare-module gate, every `aarch64-android`
+artifact is run through logos-nix's `logos-android-dt-needed-gate`: a
+`DT_NEEDED` soname that is neither shipped beside the artifact nor guaranteed
+by Android at the app's API level fails the build rather than the phone (where
+it surfaces as an `UnsatisfiedLinkError` naming one soname and none of the
+reason). Two names are allowed explicitly — `libc++_shared.so`, because Qt's
+Android platform refuses any other STL and the Native container's APK therefore
+packages it, and `liblogos_protocol.so`, the empty host-ABI stub's soname the
+host image supplies.
+
 
 ### Example
 

@@ -126,6 +126,74 @@ let
 
   mkPkgs = mkPkgsWith [ ];
 
+  # ── mobile ────────────────────────────────────────────────────────────────
+  # The iOS and Android pseudo-systems, keyed exactly as logos-nix keys them.
+  #
+  # DELIBERATELY NOT IN `systems`. A module's `packages.<system>` carries a
+  # dozen outputs — the Qt plugin, its two header variants, the LGX bundles,
+  # the standalone app — and not one of them has a mobile meaning: there is no
+  # Qt plugin host on a phone, which is the whole reason the Bare module exists.
+  # Folding these keys into `systems` would make every one of those attributes
+  # EXIST and fail only when forced, which is the shape of bug that reaches a
+  # consumer. mkLogosModule merges a mobile-only attrset (just `bare`) onto
+  # `packages` instead, the same way logos-liblogos and logos-basecamp do.
+  #
+  # A logos-nix WITHOUT the mobile helpers is the expected off state, not an
+  # error: `nix flake update` walking the input back to an upstream rev is all
+  # it takes (see the note on the input in flake.nix). Everything mobile then
+  # degrades to empty rather than throwing on an attribute that is not there,
+  # which is what this one predicate buys.
+  hasMobileSupport = logos-nix != null && logos-nix ? lib.mkIosPkgs;
+
+  mobileSystems =
+    if hasMobileSupport then [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ]
+    else [ ];
+
+  # cargo's spelling of each of those, taken from the repo that owns the
+  # platform decision rather than restated here. Empty in the same breath
+  # `mobileSystems` is, so a consumer's `or (throw ...)` never fires on a
+  # logos-nix without the mobile helpers -- it simply has no targets to ask
+  # about.
+  mobileRustTargets = if hasMobileSupport then logos-nix.lib.mobileRustTargets else { };
+
+  # The build platform each mobile target is produced FROM.
+  #
+  # iOS: only aarch64-darwin can build it at all (Xcode). Android: either
+  # member of logos-nix's androidBuildSystems, and the choice is REAL, because
+  # a cross derivation's `system` is its BUILD platform — `packages.aarch64-android`
+  # built from x86_64-linux cannot be realised on a Mac even though the Mac can
+  # build the identical closure. Hence the parameter, and hence
+  # `legacyPackages.<buildSystem>.mobile` on mkLogosModule's result for a
+  # caller that needs the other one.
+  androidBuildSystems =
+    if hasMobileSupport then logos-nix.lib.androidBuildSystems else [ ];
+
+  defaultAndroidBuildSystem =
+    if androidBuildSystems == [ ] then "x86_64-linux"
+    else lib.head androidBuildSystems;
+
+  mobileBuildSystemFor = androidBuildSystem: target:
+    if target == "aarch64-android" then androidBuildSystem else "aarch64-darwin";
+
+  mkMobilePkgs = { target, androidBuildSystem ? defaultAndroidBuildSystem }:
+    let buildSystem = mobileBuildSystemFor androidBuildSystem target; in
+    if !hasMobileSupport then
+      throw ("logos-module-builder: targeting ${target} requires a logos-nix "
+             + "input that carries the mobile helpers (lib.mkIosPkgs, "
+             + "lib.mkAndroidPkgs, lib.androidBuildSystems).")
+    else if target == "aarch64-android" then
+      logos-nix.lib.mkAndroidPkgs { inherit buildSystem; }
+    else
+      logos-nix.lib.mkIosPkgs { inherit target buildSystem; };
+
+  # f { system, pkgs, buildSystem } over every mobile target.
+  forAllMobileSystems = { androidBuildSystem ? defaultAndroidBuildSystem }: f:
+    lib.genAttrs mobileSystems (target: f {
+      system = target;
+      pkgs = mkMobilePkgs { inherit target androidBuildSystem; };
+      buildSystem = mobileBuildSystemFor androidBuildSystem target;
+    });
+
   # The build platform Windows artifacts are produced FROM.
   #
   # Single-sourced from logos-nix, which owns the decision and the reasoning
@@ -241,34 +309,10 @@ let
       pkgs = mkPkgs system;
     });
 
-  # ── the mobile pseudo-systems ──────────────────────────────────────────
-  # Deliberately NOT in `systems`: they carry exactly one of a module's twenty
-  # outputs (the Bare module -- see ./mobileBare.nix), and an `stdenv.isDarwin`
-  # is true for an iOS host, so folding them in would misroute every native
-  # branch as well as demand nineteen outputs that have no mobile shape.
-  hasMobile = logos-nix != null && logos-nix ? lib.mkMobileTargets;
-
-  # Applies `f { system, pkgs, buildSystem }` over the three mobile targets.
-  # `androidBuildSystem` is a parameter because an Android derivation's
-  # `system` is its BUILD platform: the default x86_64-linux cannot be realised
-  # on a Mac even though aarch64-darwin builds the identical closure.
-  forAllMobileTargets = { androidBuildSystem ? "x86_64-linux" }: f:
-    if !hasMobile then
-      throw ("logos-module-builder: mobile Bare modules need a logos-nix that "
-             + "publishes lib.mkMobileTargets (the iOS and Android cross sets). "
-             + "Bump the logos-nix input.")
-    else
-      logos-nix.lib.mkForAllMobileTargets
-        (logos-nix.lib.mkMobileTargets { inherit androidBuildSystem; })
-        f;
-
-  # cargo's spelling of each mobile pseudo-system, from the repo that owns the
-  # platform decision rather than restated here.
-  mobileRustTargets = if hasMobile then logos-nix.lib.mobileRustTargets else { };
-
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
-  inherit hasMobile forAllMobileTargets mobileRustTargets;
+  inherit mobileSystems mkMobilePkgs forAllMobileSystems mobileRustTargets;
+  inherit androidBuildSystems defaultAndroidBuildSystem;
   inherit classifyConcreteDeps;
 
   inherit collectAllModuleDeps;
