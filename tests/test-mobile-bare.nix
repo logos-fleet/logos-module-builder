@@ -133,8 +133,32 @@ let
     noMobileBare "a hand-written Qt core module" "test-framework-module"
     && noMobileBare "a ui_qml view backend" "qml-module";
 
+  # A module with `nix.external_libraries` has to be REFUSED, by name, at
+  # eval. Those libraries are staged into lib/ as build-platform images and
+  # nothing here can recompile them; left to the linker it surfaces forty lines
+  # into a link command as "building for 'iOS-simulator', but linking in dylib
+  # ... built for 'macOS'", which names neither the library's owner nor the
+  # fix. Asserted BY MESSAGE: a test that only checked for failure would pass
+  # on a typo in this file.
+  extlibModule = mkLogosModule {
+    src = fixturesRoot + "/extlib-module";
+    configFile = fixturesRoot + "/extlib-module/metadata.json";
+  };
+  extlibRefused =
+    let
+      attempt = builtins.tryEval
+        (builtins.deepSeq
+          (extlibModule.mobileBarePackagesFor { androidBuildSystem = buildSystem; })
+          "built");
+    in
+    if attempt.success
+    then builtins.throw
+      "FAIL: a module declaring nix.external_libraries must not offer a mobile bare output"
+    else true;
+
 in
 assert qtPluginsHaveNoMobileBare;
+assert extlibRefused;
 pkgs.runCommand "mobile-bare-tests"
 {
   nativeBuildInputs = [ pkgs.binutils ]
@@ -144,5 +168,6 @@ pkgs.runCommand "mobile-bare-tests"
   ${iosChecks}
   ${androidChecks}
   echo "PASS: Qt plugin shapes expose no mobile bare output"
+  echo "PASS: a module with nix.external_libraries is refused a mobile bare output"
   touch $out
 ''

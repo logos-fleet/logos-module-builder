@@ -59,6 +59,36 @@ let
 
       isAndroid = system == "aarch64-android";
 
+      # ── what does not cross yet ───────────────────────────────────────
+      # `nix.external_libraries` are staged into lib/ by the generate step as
+      # BUILD-PLATFORM images, and unlike a Rust core there is nothing here
+      # that could rebuild them: each comes from its own flake, which would
+      # have to publish a package for this target. Refused by name, at eval,
+      # rather than left to the linker -- which reports it as
+      #     ld: building for 'iOS-simulator', but linking in dylib
+      #         (.../libfoo.dylib) built for 'macOS'
+      # forty lines into a link command, saying nothing about whose library it
+      # is or what would fix it. (Measured on package_manager_module, whose
+      # external `lgx` is exactly this case.)
+      externalLibNames = map (e: e.name or (toString e)) config.external_libraries;
+      assertNoExternalLibs =
+        if config.external_libraries == [ ] then null
+        else throw ''
+          logos-module-builder: module '${config.name}' cannot be built as a Bare
+          module for ${system} yet: it declares nix.external_libraries
+          (${lib.concatStringsSep ", " externalLibNames}).
+
+          Those are staged into lib/ as build-platform images by the module's own
+          `generate` step, and nothing here can recompile them -- each one comes
+          from its own flake. For a mobile Bare module the external library has to
+          be built for the target and staged in its place, which means the flake
+          providing it publishing a package for ${system}.
+
+          Until then this module has a native `bare` output and no mobile one.
+          A codegen.rust core is different and DOES cross: the crate is rebuilt
+          for the target here.
+        '';
+
       # ── the Rust core, for the target ─────────────────────────────────
       # `generate` staged a build-platform archive into lib/; a Bare module
       # links it whole, so on mobile it has to be the target's.
@@ -235,7 +265,7 @@ let
         strictDeps = true;
       } // platform);
     in
-    {
+    builtins.seq assertNoExternalLibs {
       inherit bare;
       "${config.name}-bare" = bare;
       default = bare;

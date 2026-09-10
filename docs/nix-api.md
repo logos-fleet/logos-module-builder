@@ -339,6 +339,16 @@ from a Mac, ask for that build platform explicitly:
 (mkLogosModule { ... }).mobileBarePackagesFor { androidBuildSystem = "aarch64-darwin"; }
 ```
 
+**What does not cross yet.** A module declaring `nix.external_libraries` is
+REFUSED a mobile bare output, by name, at eval. Those libraries are staged into
+`lib/` as build-platform images by the module's own `generate` step, and
+nothing here can recompile them — each comes from its own flake, which would
+have to publish a package for the target. (A `codegen.rust` core is different
+and does cross: the crate is rebuilt for the target here.) Left to the linker
+it surfaces as `ld: building for 'iOS-simulator', but linking in dylib ... built
+for 'macOS'` forty lines into a link command, naming neither the library's
+owner nor the fix.
+
 **The Android gate.** On top of the Bare-module gate, every
 `aarch64-android` artifact is run through logos-nix's
 `logos-android-dt-needed-gate`: a `DT_NEEDED` soname that is neither shipped
