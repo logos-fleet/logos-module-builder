@@ -98,6 +98,16 @@
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-qt.inputs.logos-nix.follows = "logos-nix";
     logos-plugin-qt.inputs.logos-protocol.follows = "logos-protocol";
+    # ONE LIDL GRAMMAR, because this builder runs both ends of it on the same
+    # file: logos-cpp-generator WRITES a module's .lidl contract, and
+    # logos-qt-host-generator from here READS it back in the very next step.
+    # Locked apart, the writer emitted `optional_depends` (logos-cpp-sdk
+    # 5ef6ae0) and the reader had never heard of the token, so every module
+    # declaring an optional dependency failed to build — with the error in the
+    # PARSER, three repos away from the pin that caused it. This is the same
+    # reasoning as the logos-protocol follows above, on the other artefact the
+    # two generators share.
+    logos-plugin-qt.inputs.logos-lidl.follows = "logos-cpp-sdk/logos-lidl";
     # Core modules (type: core) use this backend — defaults to Qt, swappable
     # later. It MUST stay on the same rev as logos-plugin-qt above: the two
     # inputs are selected per module TYPE, they both carry the Qt host runtime,
@@ -106,6 +116,7 @@
     # logos-plugin-qt above now that logos-plugin-qt#19 has merged.
     logos-plugin-core.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-core.inputs.logos-protocol.follows = "logos-protocol";
+    logos-plugin-core.inputs.logos-lidl.follows = "logos-cpp-sdk/logos-lidl";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
     nix-bundle-logos-module-install.url = "github:logos-co/nix-bundle-logos-module-install";
     # Host shell used by `nix run` / integration tests for ui_qml modules.
