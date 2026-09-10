@@ -345,6 +345,14 @@
         bare-gate = import ./tests/test-bare-gate.nix {
           inherit pkgs;
           gateScript = ./scripts/logos-bare-gate.sh;
+          # Same published export list the gate itself reads — see the file
+          # header for why the test must not carry its own copy.
+          moduleImplAbi =
+            logos-protocol.packages.${system}.module-impl-abi
+              or (throw ("logos-module-builder: the pinned logos-protocol "
+                + "predates packages.<sys>.module-impl-abi, so the Bare-module "
+                + "gate cannot be tested against the declared export list. "
+                + "Bump the logos-protocol input."));
         };
       });
 

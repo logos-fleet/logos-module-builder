@@ -245,11 +245,11 @@ Returns an attribute set with:
 `nix build .#bare` produces the **Bare module**: the module implementation
 (a Qt-free C++ impl class, or a Rust core) linked so that
 
-- the common module-impl C ABI (`logos_module_dispatch`,
-  `logos_module_get_methods`, `logos_module_set_context`,
-  `logos_module_set_emit_callback`, `logos_module_accept_token`,
-  `logos_module_get_protocol_version`, `logos_module_string_free`) is
-  **exported** — that is the entire surface a no-Qt host drives it through;
+- every module-impl C ABI export logos-protocol declares in
+  `cpp/logos_module_impl.h` is **defined** — that is the entire surface a
+  no-Qt host drives it through. The list is read from logos-protocol's
+  published `packages.<sys>.module-impl-abi/exports.txt`, so it grows with the
+  protocol instead of being restated here;
 - the logos-protocol consumer ABI (`lp_*`) is left **undefined**, for the host
   image to supply at load time;
 - **no Qt**, no generated Qt-plugin glue and no logos-protocol archive is
@@ -258,10 +258,13 @@ Returns an attribute set with:
 It is the build shape shared by the iOS embedded framework and the Wasm host.
 Desktop targets today: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
 
-Who gets one: `interface: "cdylib"` modules (C++ or `codegen.rust`) and core
-`interface: "universal"` modules. A `type: ui_qml` view backend derives a Qt
-SimpleSource and a legacy/`provider` module is hand-written Qt, so neither
-exposes a `bare` attribute at all.
+Who gets one: exactly the modules `parseMetadata` marks
+`packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
+and core `interface: "universal"` modules, i.e. those whose own image already
+exports the module-impl C ABI. A `type: ui_qml` view backend derives a Qt
+SimpleSource and an `interface: "legacy"` module is hand-written Qt; both are
+Qt plugin objects holding a `LogosAPI`, so neither exposes a `bare` attribute
+at all.
 
 The artifact is cut from the module's own `generate` output — the tree after
 every code generator has run — so `bare` and the plugin compile the same
@@ -278,8 +281,14 @@ offending symbol or library. The gate is a plain script and can be run by hand:
 
 ```bash
 nix build .#bare
-./scripts/logos-bare-gate.sh result/lib/my_module_bare.dylib
+LOGOS_MODULE_IMPL_EXPORTS=$(nix build --no-link --print-out-paths \
+  'github:logos-co/logos-protocol#module-impl-abi')/exports.txt \
+  ./scripts/logos-bare-gate.sh result/lib/my_module_bare.dylib
 ```
+
+`LOGOS_MODULE_IMPL_EXPORTS` is required: the gate refuses to run without a
+non-empty export list rather than pass an artifact against an ABI it never
+checked.
 
 ### Example
 

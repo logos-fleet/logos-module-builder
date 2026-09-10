@@ -4,37 +4,20 @@
 # so it gets tested the only way that means anything: build artifacts that are
 # deliberately wrong and assert the gate rejects them, naming the symbol.
 #
-#   1. a well-formed Bare artifact (all seven module-impl ABI exports, lp_*
-#      undefined)                                          -> PASS
+#   1. a well-formed Bare artifact (every declared module-impl ABI export
+#      defined, lp_* undefined)                            -> PASS
 #   2. the same artifact built against Qt6::Core            -> FAIL, names a Qt symbol
 #   3. an artifact missing one module-impl ABI export       -> FAIL, names the export
 #   4. an artifact that DEFINES lp_invoke (as linking the
 #      logos-protocol archive would)                        -> FAIL, names lp_invoke
-{ pkgs, gateScript }:
+#   5. the gate run against an empty/absent export list     -> REFUSE (exit 2)
+#
+# The ABI stubs are GENERATED from logos-protocol's published exports.txt, not
+# hand-copied: the gate reads that same list, and a test carrying its own copy
+# could agree with a stale gate while both drifted from the protocol.
+{ pkgs, gateScript, moduleImplAbi }:
 
 let
-  # The seven exports of logos-protocol/cpp/logos_module_impl.h, hand-written
-  # here so the gate is tested against the ABI itself and not against whatever
-  # the generator happened to emit.
-  abiExports = ''
-    #include <cstdlib>
-    #include <cstring>
-    #define EXPORT extern "C" __attribute__((visibility("default")))
-    // The consumer ABI a Bare module leaves undefined for the host image.
-    extern "C" int lp_invoke(const char*, const char*, const char*, char**, char**);
-    EXPORT char* logos_module_dispatch(const char* m, const char* a) {
-        char* out = nullptr; char* err = nullptr;
-        lp_invoke("peer", m, a, &out, &err);
-        return out;
-    }
-    EXPORT char* logos_module_get_methods(void) { return strdup("[]"); }
-    EXPORT void logos_module_set_context(const char*, const char*, const char*) {}
-    EXPORT void logos_module_set_emit_callback(void (*)(const char*, const char*, void*), void*) {}
-    EXPORT int logos_module_accept_token(const char*, const char*) { return 0; }
-    EXPORT const char* logos_module_get_protocol_version(void) { return "1.0.0"; }
-    EXPORT void logos_module_string_free(char* s) { std::free(s); }
-  '';
-
   isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
   # Undefined symbols in a shared object are the norm on ELF and must be asked
   # for on Mach-O — the same flag mkLogosModule's bare build uses.
@@ -49,12 +32,39 @@ in pkgs.runCommandCC "bare-gate-tests" {
   set -uo pipefail
   export HOME=$TMPDIR
   gate=${gateScript}
+  exports=${moduleImplAbi}/exports.txt
+  export LOGOS_MODULE_IMPL_EXPORTS="$exports"
   # cc-wrapper puts c++ on PATH; CXX is not always exported into a runCommand.
   CXXBIN="''${CXX:-c++}"
 
-  cat > abi.cpp <<'CPP'
-  ${abiExports}
-  CPP
+  echo "=== gating against the module-impl ABI declared by logos-protocol ==="
+  cat "$exports"
+
+  # Emit a C++ translation unit defining every DECLARED module-impl export.
+  # Only the NAMES matter here — the gate reads nm, not signatures — so each
+  # export becomes a trivial no-arg stub.
+  gen_abi() {
+    echo '#include <cstdlib>'
+    echo '#include <cstring>'
+    echo '#include <string>'
+    echo '#define EXPORT extern "C" __attribute__((visibility("default")))'
+    echo '// The consumer ABI a Bare module leaves UNDEFINED for the host image.'
+    echo 'extern "C" int lp_invoke(const char*, const char*, const char*, char**, char**);'
+    first=1
+    while read -r sym; do
+      sym=$(printf '%s' "$sym" | tr -d '[:space:]')
+      [ -n "$sym" ] || continue
+      if [ "$first" = 1 ]; then
+        # One stub actually calls lp_invoke, so a well-formed artifact carries
+        # it as an UNDEFINED symbol — the Bare shape's defining property.
+        echo "EXPORT void $sym(void) { lp_invoke(\"p\", \"m\", \"a\", nullptr, nullptr); }"
+        first=0
+      else
+        echo "EXPORT void $sym(void) {}"
+      fi
+    done < "$exports"
+  }
+  gen_abi > abi.cpp
 
   echo "=== case 1: a well-formed Bare artifact must PASS ==="
   "$CXXBIN" -std=c++17 -fPIC -shared -o clean.${soExt} abi.cpp ${undefinedFlags}
@@ -65,30 +75,32 @@ in pkgs.runCommandCC "bare-gate-tests" {
   echo "PASS: clean artifact accepted"
 
   echo "=== case 2: a deliberately Qt-linked build must FAIL naming the Qt symbol ==="
-  mkdir -p qtcase && cd qtcase
-  cat > qt_bare.cpp <<'CPP'
-  #include <QString>
-  ${abiExports}
-  // Deliberate Qt reference: this is what the gate exists to catch.
-  extern "C" __attribute__((visibility("default"))) const char* qt_leak() {
-      static QString s = QStringLiteral("qt");
-      static std::string b = s.toStdString();
-      return b.c_str();
-  }
-  CPP
+  mkdir -p qtcase
+  { gen_abi
+    cat <<'CPP'
+#include <QString>
+// Deliberate Qt reference: this is what the gate exists to catch.
+extern "C" __attribute__((visibility("default"))) const char* qt_leak() {
+    static QString s = QStringLiteral("qt");
+    static std::string b = s.toStdString();
+    return b.c_str();
+}
+CPP
+  } > qtcase/qt_bare.cpp
+  cd qtcase
   cat > CMakeLists.txt <<'CMAKE'
-  cmake_minimum_required(VERSION 3.14)
-  project(QtLinkedBare LANGUAGES CXX)
-  set(CMAKE_CXX_STANDARD 17)
-  find_package(Qt6 REQUIRED COMPONENTS Core)
-  add_library(qt_linked_bare SHARED qt_bare.cpp)
-  target_link_libraries(qt_linked_bare PRIVATE Qt6::Core)
-  if(APPLE)
-      # Same undefined-symbol policy the real bare build uses, so the only
-      # difference between this artifact and a legitimate one is the Qt link.
-      target_link_options(qt_linked_bare PRIVATE -undefined dynamic_lookup)
-  endif()
-  CMAKE
+cmake_minimum_required(VERSION 3.14)
+project(QtLinkedBare LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+find_package(Qt6 REQUIRED COMPONENTS Core)
+add_library(qt_linked_bare SHARED qt_bare.cpp)
+target_link_libraries(qt_linked_bare PRIVATE Qt6::Core)
+if(APPLE)
+    # Same undefined-symbol policy the real bare build uses, so the only
+    # difference between this artifact and a legitimate one is the Qt link.
+    target_link_options(qt_linked_bare PRIVATE -undefined dynamic_lookup)
+endif()
+CMAKE
   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release > /dev/null
   cmake --build build > /dev/null
   qtlib=$(find build -name 'libqt_linked_bare.*' -type f | head -1)
@@ -107,22 +119,28 @@ in pkgs.runCommandCC "bare-gate-tests" {
   echo "PASS: Qt-linked artifact rejected, offending symbol named"
 
   echo "=== case 3: a missing module-impl ABI export must FAIL naming it ==="
-  sed '/logos_module_string_free/d' abi.cpp > partial.cpp
+  # Drop whichever export the protocol lists last, so this case keeps testing
+  # a real declared symbol as the ABI grows.
+  drop=$(grep -v '^[[:space:]]*$' "$exports" | tail -1 | tr -d '[:space:]')
+  echo "dropping: $drop"
+  grep -v "^EXPORT void $drop(" abi.cpp > partial.cpp
+  cmp -s abi.cpp partial.cpp && { echo "FAIL: nothing was dropped from abi.cpp"; exit 1; }
   "$CXXBIN" -std=c++17 -fPIC -shared -o partial.${soExt} partial.cpp ${undefinedFlags}
   if bash "$gate" partial.${soExt} > case3.log 2>&1; then
     echo "FAIL: the gate ACCEPTED an artifact missing an ABI export"; exit 1
   fi
-  grep -q "missing module-impl ABI export: logos_module_string_free" case3.log \
+  grep -q "missing module-impl ABI export: $drop" case3.log \
     || { echo "FAIL: missing-export failure did not name the export:"; cat case3.log; exit 1; }
   echo "PASS: missing ABI export rejected by name"
 
   echo "=== case 4: a DEFINED lp_* (the protocol archive linked in) must FAIL ==="
-  cat > carried.cpp <<'CPP'
-  ${abiExports}
-  // What linking the logos-protocol archive would look like from the outside.
-  extern "C" __attribute__((visibility("default")))
-  int lp_invoke(const char*, const char*, const char*, char**, char**) { return 0; }
-  CPP
+  { gen_abi
+    cat <<'CPP'
+// What linking the logos-protocol archive would look like from the outside.
+extern "C" __attribute__((visibility("default")))
+int lp_invoke(const char*, const char*, const char*, char**, char**) { return 0; }
+CPP
+  } > carried.cpp
   "$CXXBIN" -std=c++17 -fPIC -shared -o carried.${soExt} carried.cpp ${undefinedFlags}
   if bash "$gate" carried.${soExt} > case4.log 2>&1; then
     echo "FAIL: the gate ACCEPTED an artifact carrying lp_invoke"; exit 1
@@ -130,6 +148,21 @@ in pkgs.runCommandCC "bare-gate-tests" {
   grep -q "logos_protocol symbol DEFINED in a Bare module: lp_invoke" case4.log \
     || { echo "FAIL: carried-protocol failure did not name lp_invoke:"; cat case4.log; exit 1; }
   echo "PASS: carried logos-protocol code rejected by name"
+
+  echo "=== case 5: the gate must REFUSE to run against no ABI list ==="
+  # Anti-vacuity. An unset or empty list would make clause 1 pass every
+  # artifact silently, which is worse than no gate at all.
+  : > empty.txt
+  for bad in "" "$PWD/empty.txt" "$PWD/does-not-exist.txt"; do
+    # `|| rc=$?` and not a bare call: stdenv's builder runs under `set -e`, so
+    # an unguarded non-zero exit would kill the test instead of being asserted.
+    rc=0
+    LOGOS_MODULE_IMPL_EXPORTS="$bad" bash "$gate" clean.${soExt} > case5.log 2>&1 || rc=$?
+    test "$rc" = 2 \
+      || { echo "FAIL: expected refusal (exit 2) for LOGOS_MODULE_IMPL_EXPORTS='$bad', got $rc:"
+           cat case5.log; exit 1; }
+  done
+  echo "PASS: the gate refuses to run against an unexamined ABI"
 
   mkdir -p $out
   cp case*.log $out/

@@ -26,6 +26,11 @@
   logosSdk,
   logosProtocol,
   gateScript,
+  # logos-protocol's published module-impl export list
+  # (packages.<sys>.module-impl-abi). The gate reads the ABI from here rather
+  # than restating it, so a Bare module is gated against whatever the protocol
+  # actually declares at the pinned revision.
+  moduleImplAbi,
   # Compiled Rust/Go archives are staged in lib/ by the generate step; these are
   # the basenames LogosModule.cmake links whole into the artifact.
   rustStaticNames ? [],
@@ -114,7 +119,8 @@ in pkgs.stdenv.mkDerivation ({
   installCheckPhase = ''
     runHook preInstallCheck
     echo "logos-module-builder: gating ${artifact}"
-    bash ${gateScript} "$out/lib/${artifact}"
+    LOGOS_MODULE_IMPL_EXPORTS=${moduleImplAbi}/exports.txt \
+      bash ${gateScript} "$out/lib/${artifact}"
     runHook postInstallCheck
   '';
 

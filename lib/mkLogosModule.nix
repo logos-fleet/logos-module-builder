@@ -898,6 +898,13 @@ let
           inherit logosSdk;
           logosProtocol = logosProtocolPkg;
           gateScript = builderRoot + "/scripts/logos-bare-gate.sh";
+          moduleImplAbi =
+            logos-protocol.packages.${system}.module-impl-abi
+              or (throw ("logos-module-builder: the pinned logos-protocol "
+                + "predates packages.<sys>.module-impl-abi, so the Bare-module "
+                + "gate cannot read the declared module-impl export list. Bump "
+                + "the logos-protocol input — the gate reads that list instead "
+                + "of keeping its own copy, precisely so it cannot go stale."));
           rustStaticNames = lib.optional isRustModule rustStaticName;
           goStaticNames = config.go_static_lib_names;
           extraNativeBuildInputs = extraNativeBuildInputs ++ buildPkgs;
