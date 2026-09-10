@@ -283,6 +283,10 @@ nix build .#include
 nix build .#lgx
 nix build .#lgx-portable
 
+# Build the Bare module artifact (protocol-free: module-impl C ABI exported,
+# lp_* undefined, no Qt). cdylib + core universal modules only.
+nix build .#bare
+
 # Run UI module in logos-standalone-app
 nix run .
 

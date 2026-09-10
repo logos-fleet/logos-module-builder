@@ -2,7 +2,7 @@
 # This is the main entry point for building Logos modules.
 # Plugin compilation and header generation are delegated to a backend selected
 # by metadata.json "type": core modules use coreBackend, UI modules use uiBackend.
-{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
+{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, buildBareModule, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
 
 {
   # Required: Path to the module source
@@ -532,6 +532,38 @@ let
       # `nix develop` shell (which exports LOGOS_*_ROOT) without re-running codegen.
       moduleGenerate = selectedBackend.generate (mkPluginArgs "default");
 
+      # ── the Bare module artifact ──────────────────────────────────────────
+      # `nix build .#bare`: the module impl (C++ or Rust core) exporting the
+      # common module-impl C ABI, with lp_* undefined and no Qt, no generated Qt
+      # glue and no logos-protocol archive. Cut from `moduleGenerate` — the
+      # snapshot of the tree after every generator has run — so the bare and
+      # plugin outputs compile the SAME sources, the bare one just leaves the Qt
+      # ones on the floor. Building it never realises the plugin.
+      #
+      # Offered only for the two authoring shapes that HAVE a Qt-free impl: a
+      # `cdylib` module (C++ or codegen.rust) and a core `universal` module (a
+      # header-first cdylib). A ui_qml view backend derives a Qt SimpleSource
+      # and a legacy/provider module is hand-written Qt — neither has a
+      # protocol-free form to extract, so they get no `bare` output at all
+      # rather than one that cannot pass the gate.
+      bareEligible =
+        config.interface == "cdylib"
+        || (config.interface == "universal" && (config.type or "core") != "ui_qml");
+
+      bareLib =
+        if !bareEligible then null
+        else buildBareModule {
+          inherit pkgs config builderRoot;
+          generatedSrc = moduleGenerate;
+          inherit logosSdk;
+          logosProtocol = logosProtocolPkg;
+          gateScript = builderRoot + "/scripts/logos-bare-gate.sh";
+          rustStaticNames = lib.optional isRustModule rustStaticName;
+          goStaticNames = config.go_static_lib_names;
+          extraNativeBuildInputs = extraNativeBuildInputs ++ buildPkgs;
+          extraBuildInputs = extraBuildInputs ++ runtimePkgs;
+        };
+
       # Two header variants per module — Qt-typed and lp (Qt-free,
       # logos-protocol C ABI). Each is its own Nix derivation, so a
       # downstream module only realises the one its `--api-style` actually
@@ -630,6 +662,11 @@ let
       # re-runs (LogosModule.cmake consumes the pre-populated generated_code/).
       generate = moduleGenerate;
       "${config.name}-generate" = moduleGenerate;
+    } // lib.optionalAttrs (bareLib != null) {
+      # The Bare module artifact — gated at build time by
+      # scripts/logos-bare-gate.sh (protocol-free or no derivation).
+      bare = bareLib;
+      "${config.name}-bare" = bareLib;
     } // lib.optionalAttrs (moduleLibPortable != null) {
       "${config.name}-lib-portable" = moduleLibPortable;
       lib-portable = moduleLibPortable;

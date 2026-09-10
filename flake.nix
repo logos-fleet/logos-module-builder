@@ -141,6 +141,21 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
         };
+        # Integration test: the `bare` output (the Bare module artifact) for a
+        # universal C++ leaf, a universal C++ module with a dependency, and a
+        # codegen.rust module. Each build runs the gate as its installCheck.
+        bare-modules = import ./tests/test-bare-modules.nix {
+          inherit pkgs;
+          mkLogosModule = lib.mkLogosModule;
+          fixturesRoot = ./tests/fixtures;
+        };
+        # The Bare-module gate: deliberately-wrong artifacts (Qt-linked, an
+        # ABI export missing, the logos-protocol archive carried) must be
+        # rejected by name. No module build — just the gate and nm/otool.
+        bare-gate = import ./tests/test-bare-gate.nix {
+          inherit pkgs;
+          gateScript = ./scripts/logos-bare-gate.sh;
+        };
       });
 
       # Development shell for working on the builder itself

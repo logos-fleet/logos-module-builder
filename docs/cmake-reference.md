@@ -195,7 +195,30 @@ This will:
 4. Add Protobuf include directories
 5. Link Protobuf libraries
 
+#### LOGOS_MODULE_BARE (CMake cache variable)
+`-DLOGOS_MODULE_BARE=ON` switches `logos_module()` to build the **Bare module**
+artifact instead of the Qt plugin: it delegates to `logos_bare_module()` and
+returns immediately, so `logos_find_qt()` never runs and neither Qt nor
+logos-qt-sdk has to be present. `mkLogosModule`'s `bare` output is what sets it;
+you rarely set it by hand.
+
 ## Helper Functions
+
+### logos_bare_module()
+Builds the Bare module artifact: the module impl (C++ or Rust core) plus the
+Qt-free generated sources, exporting the common module-impl C ABI with `lp_*`
+left undefined and no Qt on the link line.
+
+It compiles `SOURCES` plus the generated `*.cpp` in `generated_code/`, minus
+every Qt-bearing one (`*_cdylib_glue.cpp`, `*_qt_glue.cpp`, `*_dispatch.cpp`,
+`*_events.cpp`, `*_ui_glue.cpp`; `*_api.cpp` is `#include`d by `logos_sdk.cpp`).
+Rust and Go archives are linked **whole** (`-force_load` / `--whole-archive`)
+because, unlike the plugin, nothing here references their exports. Output:
+`build/bare/<name>_bare.{dylib,so}`.
+
+Called by `logos_module()` when `LOGOS_MODULE_BARE` is ON; it takes the same
+`NAME` / `SOURCES` / `EXTERNAL_LIBS` / `FIND_PACKAGES` / `LINK_LIBRARIES` /
+`LINK_TARGETS` / `INCLUDE_DIRS` arguments.
 
 ### logos_find_dependencies()
 
@@ -252,6 +275,7 @@ For a module named `my_module`, the following are created:
 | Target | Description |
 |--------|-------------|
 | `my_module_module_plugin` | Main library target |
+| `my_module_bare` | Bare module artifact (only when `LOGOS_MODULE_BARE=ON`) |
 | `run_cpp_generator_my_module` | Code generation target (source layout) |
 | `my_module_generate_protos` | Protobuf generation target (if PROTO_FILES) |
 
@@ -259,10 +283,12 @@ For a module named `my_module`, the following are created:
 
 ```
 build/
-└── modules/
-    ├── my_module_plugin.so      # or .dylib
-    ├── libfoo.so                # external libs copied here
-    └── ...
+├── modules/
+│   ├── my_module_plugin.so      # or .dylib
+│   ├── libfoo.so                # external libs copied here
+│   └── ...
+└── bare/                        # only with -DLOGOS_MODULE_BARE=ON
+    └── my_module_bare.so        # or .dylib
 ```
 
 ## Complete Example

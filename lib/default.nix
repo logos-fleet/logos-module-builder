@@ -13,10 +13,15 @@ let
   # Import the metadata parser (reads metadata.json)
   parseMetadata = import ./parseMetadata.nix { inherit lib; };
 
+  # Import the Bare module builder (the protocol-free artifact + its gate).
+  # Backend-agnostic on purpose: a Bare module has no Qt plugin in it, so it is
+  # built here rather than delegated to a plugin backend.
+  buildBareModule = import ./buildBareModule.nix { inherit lib; };
+
   # Import the core module builder (routes to the right backend by type)
   mkLogosModule = import ./mkLogosModule.nix {
     inherit nixpkgs nix-bundle-lgx nix-bundle-logos-module-install logos-standalone-app lib;
-    inherit common parseMetadata builderRoot uiBackend coreBackend;
+    inherit common parseMetadata builderRoot uiBackend coreBackend buildBareModule;
     inherit logos-cpp-sdk logos-protocol logos-qt-sdk logos-module logos-test-framework logos-rust-sdk;
     inherit rust-overlay;
   };
@@ -54,6 +59,7 @@ in {
 
   # Lower-level builders for advanced use cases
   inherit mkExternalLib;
+  inherit buildBareModule;     # the Bare module artifact (protocol-free)
 
   # Utilities
   inherit parseMetadata;

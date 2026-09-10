@@ -120,7 +120,11 @@ function(logos_find_dependencies)
         set(_protocol_found TRUE)
     endif()
 
-    if(NOT _module_found)
+    # logos-module (the Qt PluginInterface) and logos-qt-sdk are the Qt half of
+    # a module build. A Bare build (LOGOS_MODULE_BARE) produces the protocol-free
+    # artifact and never compiles or links either, so it must not be forced to
+    # have them present — that absence is half the point of the output.
+    if(NOT _module_found AND NOT LOGOS_MODULE_BARE)
         message(FATAL_ERROR "logos-module not found at ${LOGOS_MODULE_ROOT}. "
                             "Set LOGOS_MODULE_ROOT environment variable or CMake variable.")
     endif()
@@ -129,7 +133,7 @@ function(logos_find_dependencies)
         message(FATAL_ERROR "logos-cpp-sdk not found at ${LOGOS_CPP_SDK_ROOT}. "
                             "Set LOGOS_CPP_SDK_ROOT environment variable or CMake variable.")
     endif()
-    if(NOT _qt_sdk_found)
+    if(NOT _qt_sdk_found AND NOT LOGOS_MODULE_BARE)
         message(FATAL_ERROR "logos-qt-sdk not found at ${LOGOS_QT_SDK_ROOT}. "
                             "Set LOGOS_QT_SDK_ROOT environment variable or CMake variable.")
     endif()
@@ -166,6 +170,244 @@ function(logos_find_qt)
         endif()
     endif()
     find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core RemoteObjects)
+endfunction()
+
+#[=======================================================================[.rst:
+logos_bare_module
+-----------------
+
+Build the **Bare module** artifact: the protocol-free shape of a module.
+
+A Bare module is the module implementation (a Qt-free C++ impl class, or a
+Rust core) plus the generated Qt-free C-ABI wrapper, linked so that
+
+  * the common module-impl C ABI (logos-protocol/cpp/logos_module_impl.h) is
+    EXPORTED — that is the whole surface a no-Qt host drives it through;
+  * the logos-protocol consumer ABI (``lp_*``) is left UNDEFINED, for the host
+    image to supply at load time;
+  * no Qt, no generated Qt-plugin glue and no logos-protocol archive is linked.
+
+It is the build shape shared by the iOS embedded framework and the Wasm host.
+``logos_module()`` routes here when ``LOGOS_MODULE_BARE`` is ON and then
+returns, so a bare build never calls ``logos_find_qt()`` and needs neither Qt
+nor logos-qt-sdk present.
+
+The nix wrapper (mkLogosModule's ``bare`` output) runs
+``scripts/logos-bare-gate.sh`` over the result; this function only has to
+produce the artifact, the gate decides whether it is honest.
+#]=======================================================================]
+function(logos_bare_module)
+    cmake_parse_arguments(
+        BARE
+        ""
+        "NAME"
+        "SOURCES;EXTERNAL_LIBS;FIND_PACKAGES;LINK_LIBRARIES;LINK_TARGETS;INCLUDE_DIRS"
+        ${ARGN}
+    )
+
+    set(_BARE_TARGET ${BARE_NAME}_bare)
+    set(_BARE_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated_code")
+
+    foreach(pkg ${BARE_FIND_PACKAGES})
+        find_package(${pkg} REQUIRED)
+    endforeach()
+
+    # The generated translation units, minus every Qt-bearing one. Kept:
+    #   <name>_module_impl.cpp    the module-impl C ABI exports
+    #   <name>_events_cdylib.cpp  typed event emitters (Qt-free flavour)
+    #   logos_sdk.cpp             the lp_*-backed modules().<dep> surface
+    # Dropped: the uniform Qt-plugin glue (<name>_cdylib_glue.cpp), the Qt
+    # provider dispatch (<name>_dispatch.cpp, logos_provider_dispatch.cpp), the
+    # Qt event sidecar (<name>_events.cpp) and the ui glue. <name>_api.cpp is
+    # #include'd by logos_sdk.cpp, never compiled on its own.
+    file(GLOB _BARE_GEN_CPPS CONFIGURE_DEPENDS "${_BARE_GEN_DIR}/*.cpp")
+    list(FILTER _BARE_GEN_CPPS EXCLUDE REGEX
+        "/([^/]*_api|[^/]*_dispatch|[^/]*_events|[^/]*_cdylib_glue|[^/]*_qt_glue|[^/]*_ui_glue)\\.cpp$")
+
+    if(NOT _BARE_GEN_CPPS AND NOT BARE_SOURCES)
+        message(FATAL_ERROR
+            "logos_bare_module(${BARE_NAME}): nothing to compile. Expected the "
+            "Qt-free generated sources in ${_BARE_GEN_DIR} (run the module's "
+            "code generators first) or module SOURCES.")
+    endif()
+
+    add_library(${_BARE_TARGET} SHARED ${BARE_SOURCES} ${_BARE_GEN_CPPS})
+
+    # A Bare module has no QObject in it — AUTOMOC is on directory-wide for the
+    # plugin build, so turn it off here or cmake would demand Qt's moc.
+    set_target_properties(${_BARE_TARGET} PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        PREFIX ""
+        OUTPUT_NAME "${BARE_NAME}_bare"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bare"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bare"
+    )
+
+    target_include_directories(${_BARE_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${_BARE_GEN_DIR}
+        ${_BARE_GEN_DIR}/include
+    )
+
+    # Qt-free SDK headers only: logos-cpp-sdk (LogosModuleContext, StdLogosResult,
+    # LpClient) and logos-protocol's header surface (logos_protocol.h's lp_* C
+    # ABI, logos_module_impl.h, logos_codec.h). Headers only — the protocol
+    # LIBRARY is deliberately not linked.
+    if(LOGOS_CPP_SDK_IS_SOURCE)
+        target_include_directories(${_BARE_TARGET} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/cpp
+            ${LOGOS_CPP_SDK_ROOT}/cpp/generated
+        )
+    else()
+        target_include_directories(${_BARE_TARGET} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/include
+            ${LOGOS_CPP_SDK_ROOT}/include/cpp
+        )
+    endif()
+    if(EXISTS "${LOGOS_PROTOCOL_ROOT}/cpp/logos_protocol.h")
+        target_include_directories(${_BARE_TARGET} PRIVATE ${LOGOS_PROTOCOL_ROOT}/cpp)
+    else()
+        target_include_directories(${_BARE_TARGET} PRIVATE
+            ${LOGOS_PROTOCOL_ROOT}/include
+            ${LOGOS_PROTOCOL_ROOT}/include/cpp
+        )
+    endif()
+
+    foreach(dir ${BARE_INCLUDE_DIRS})
+        target_include_directories(${_BARE_TARGET} PRIVATE ${dir})
+    endforeach()
+
+    # nlohmann_json is the only library a Bare C++ module needs (header-only).
+    # logos-cpp-sdk::logos_headers is an INTERFACE target that carries it plus
+    # the SDK include path; both are Qt-free.
+    if(EXISTS "${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk")
+        find_package(logos-cpp-sdk REQUIRED CONFIG
+            PATHS ${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk
+            NO_DEFAULT_PATH)
+        target_link_libraries(${_BARE_TARGET} PRIVATE logos-cpp-sdk::logos_headers)
+    else()
+        find_package(nlohmann_json REQUIRED)
+        target_link_libraries(${_BARE_TARGET} PRIVATE nlohmann_json::nlohmann_json)
+    endif()
+
+    foreach(target ${BARE_LINK_TARGETS})
+        if(TARGET ${target})
+            target_link_libraries(${_BARE_TARGET} PRIVATE ${target})
+        else()
+            message(FATAL_ERROR
+                "LINK_TARGETS target '${target}' was not defined before "
+                "logos_module(). Refusing to silently drop a configured link target.")
+        endif()
+    endforeach()
+
+    # External libraries — same lookup as the plugin build (staged in lib/ by
+    # the builder, or pointed at directly by LOGOS_EXT_ROOT_<NAME>).
+    foreach(ext_lib ${BARE_EXTERNAL_LIBS})
+        string(TOUPPER "${ext_lib}" _ext_lib_upper)
+        set(_ext_root_var "LOGOS_EXT_ROOT_${_ext_lib_upper}")
+        if(DEFINED ENV{${_ext_root_var}})
+            set(EXT_LIB_DIR "$ENV{${_ext_root_var}}/lib")
+            set(EXT_INCLUDE_DIR "$ENV{${_ext_root_var}}/include")
+        else()
+            set(EXT_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+            set(EXT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+        endif()
+        if(APPLE)
+            set(EXT_LIB_NAMES lib${ext_lib}.dylib lib${ext_lib}.so ${ext_lib}.dylib ${ext_lib}.so lib${ext_lib}.a ${ext_lib}.a)
+        else()
+            set(EXT_LIB_NAMES lib${ext_lib}.so lib${ext_lib}.dylib ${ext_lib}.so ${ext_lib}.dylib lib${ext_lib}.a ${ext_lib}.a)
+        endif()
+        find_library(${ext_lib}_BARE_PATH NAMES ${EXT_LIB_NAMES} PATHS ${EXT_LIB_DIR} NO_DEFAULT_PATH)
+        if(${ext_lib}_BARE_PATH)
+            target_link_libraries(${_BARE_TARGET} PRIVATE ${${ext_lib}_BARE_PATH})
+            target_include_directories(${_BARE_TARGET} PRIVATE ${EXT_INCLUDE_DIR})
+        else()
+            message(FATAL_ERROR
+                "External library '${ext_lib}' was not found in ${EXT_LIB_DIR}. "
+                "Refusing to build a Bare module with a missing dependency.")
+        endif()
+    endforeach()
+
+    # Go and Rust static archives. Unlike the plugin, the Bare artifact has no
+    # Qt glue referencing the module-impl exports, so nothing would pull the
+    # archive members in: link them whole so the C ABI actually lands in the
+    # artifact (and the gate can see it).
+    set(_BARE_STATIC_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+    set(_BARE_WHOLE_ARCHIVES "")
+    foreach(_golib IN LISTS LOGOS_MODULE_GO_STATIC_LIBS)
+        if(NOT _golib STREQUAL "")
+            find_library(_LOGOS_BARE_GO_${_golib}
+                NAMES lib${_golib}.a lib${_golib}.lib ${_golib}.a ${_golib}.lib
+                PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH)
+            if(NOT _LOGOS_BARE_GO_${_golib})
+                message(FATAL_ERROR "Go static library '${_golib}' was not found in ${_BARE_STATIC_LIB_DIR}.")
+            endif()
+            list(APPEND _BARE_WHOLE_ARCHIVES ${_LOGOS_BARE_GO_${_golib}})
+        endif()
+    endforeach()
+    foreach(_rustlib IN LISTS LOGOS_MODULE_RUST_STATIC_LIBS)
+        if(NOT _rustlib STREQUAL "")
+            find_library(_LOGOS_BARE_RUST_${_rustlib}
+                NAMES lib${_rustlib}.a ${_rustlib}
+                PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH)
+            if(NOT _LOGOS_BARE_RUST_${_rustlib})
+                message(FATAL_ERROR
+                    "Rust static library '${_rustlib}' (a codegen.rust module) was not "
+                    "found in ${_BARE_STATIC_LIB_DIR}. The builder stages the compiled "
+                    "staticlib there before the link; this usually means the crate build "
+                    "or staging step did not run.")
+            endif()
+            list(APPEND _BARE_WHOLE_ARCHIVES ${_LOGOS_BARE_RUST_${_rustlib}})
+        endif()
+    endforeach()
+
+    foreach(_archive IN LISTS _BARE_WHOLE_ARCHIVES)
+        if(APPLE)
+            target_link_options(${_BARE_TARGET} PRIVATE -Wl,-force_load,${_archive})
+        else()
+            target_link_options(${_BARE_TARGET} PRIVATE
+                -Wl,--whole-archive ${_archive} -Wl,--no-whole-archive)
+        endif()
+    endforeach()
+    if(_BARE_WHOLE_ARCHIVES)
+        if(APPLE)
+            target_link_libraries(${_BARE_TARGET} PRIVATE
+                "-framework CoreFoundation" "-framework Security")
+        else()
+            target_link_libraries(${_BARE_TARGET} PRIVATE pthread dl)
+        endif()
+    endif()
+
+    foreach(lib ${BARE_LINK_LIBRARIES})
+        target_link_libraries(${_BARE_TARGET} PRIVATE ${lib})
+    endforeach()
+
+    # lp_* stays undefined: that IS the Bare shape. ELF allows undefined symbols
+    # in a shared object by default; Mach-O has to be told.
+    if(APPLE)
+        target_link_options(${_BARE_TARGET} PRIVATE -undefined dynamic_lookup)
+        set_target_properties(${_BARE_TARGET} PROPERTIES
+            INSTALL_RPATH "@loader_path"
+            INSTALL_NAME_DIR "@rpath"
+            BUILD_WITH_INSTALL_NAME_DIR TRUE
+        )
+    else()
+        set_target_properties(${_BARE_TARGET} PROPERTIES
+            INSTALL_RPATH "$ORIGIN"
+            INSTALL_RPATH_USE_LINK_PATH FALSE
+        )
+    endif()
+
+    install(TARGETS ${_BARE_TARGET}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/bare
+        RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/bare
+    )
+
+    message(STATUS "Logos Bare module ${BARE_NAME} configured (protocol-free, no Qt)")
 endfunction()
 
 #[=======================================================================[.rst:
@@ -218,6 +460,24 @@ function(logos_module)
 
     # Find dependencies
     logos_find_dependencies()
+
+    # LOGOS_MODULE_BARE switches this call to the Bare module output (the
+    # protocol-free artifact) INSTEAD of the Qt plugin, and returns. Nothing
+    # below this point runs: no logos_find_qt(), no plugin target, no Qt on the
+    # link line. mkLogosModule's `bare` output is what sets it.
+    if(LOGOS_MODULE_BARE)
+        logos_bare_module(
+            NAME ${MODULE_NAME}
+            SOURCES ${MODULE_SOURCES}
+            EXTERNAL_LIBS ${MODULE_EXTERNAL_LIBS}
+            FIND_PACKAGES ${MODULE_FIND_PACKAGES}
+            LINK_LIBRARIES ${MODULE_LINK_LIBRARIES}
+            LINK_TARGETS ${MODULE_LINK_TARGETS}
+            INCLUDE_DIRS ${MODULE_INCLUDE_DIRS}
+        )
+        return()
+    endif()
+
     logos_find_qt()
 
     # Embed metadata next to plugin sources (AUTOMOC / Q_PLUGIN_METADATA)
