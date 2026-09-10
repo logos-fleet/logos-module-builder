@@ -322,14 +322,24 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
           templatesRoot = ./templates;
-          moduleImplAbi =
-            logos-protocol.packages.${system}.module-impl-abi
-              or (throw ("logos-module-builder: the pinned logos-protocol "
-                + "predates packages.<sys>.module-impl-abi, so the declared "
-                + "module-impl export list cannot be read. Bump the "
-                + "logos-protocol input — the list is published by the repo "
-                + "that owns the ABI precisely so no consumer has to keep its "
-                + "own copy."));
+          moduleImplAbi = lib.moduleImplAbiFor system;
+        };
+        # Integration test: the `bare` output (the Bare module artifact) for a
+        # universal C++ leaf, a universal C++ module with a dependency, and a
+        # codegen.rust module. Each build runs the gate as its installCheck.
+        bare-modules = import ./tests/test-bare-modules.nix {
+          inherit pkgs;
+          mkLogosModule = lib.mkLogosModule;
+          fixturesRoot = ./tests/fixtures;
+        };
+        # The Bare-module gate: deliberately-wrong artifacts (Qt-linked, an
+        # ABI export missing, the logos-protocol archive carried) must be
+        # rejected by name. No module build — just the gate and nm/otool.
+        bare-gate = import ./tests/test-bare-gate.nix {
+          inherit pkgs;
+          gateScript = ./scripts/logos-bare-gate.sh;
+          # The same published export list the gate itself reads.
+          moduleImplAbi = lib.moduleImplAbiFor system;
         };
       });
 

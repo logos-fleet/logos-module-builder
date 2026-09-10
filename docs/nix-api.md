@@ -217,6 +217,10 @@ Returns an attribute set with:
       install = <dev install package>;  # always included
       install-portable = <portable install package>;  # always included
 
+      # Only for `interface: "cdylib"` and core `interface: "universal"` modules:
+      bare = <Bare module artifact>;
+      <name>-bare = <Bare module artifact>;
+
       # Only when externalLibInputs uses structured format with variants:
       <name>-lib-portable = <portable library package>;
       lib-portable = <portable library package>;
@@ -235,6 +239,56 @@ Returns an attribute set with:
   metadataJson = <metadata.json content>;
 }
 ```
+
+### The `bare` output — the Bare module artifact
+
+`nix build .#bare` produces the **Bare module**: the module implementation
+(a Qt-free C++ impl class, or a Rust core) linked so that
+
+- every module-impl C ABI export logos-protocol declares in
+  `cpp/logos_module_impl.h` is **defined** — that is the entire surface a
+  no-Qt host drives it through. The list is read from logos-protocol's
+  published `packages.<sys>.module-impl-abi/exports.txt`, so it grows with the
+  protocol instead of being restated here;
+- the logos-protocol consumer ABI (`lp_*`) is left **undefined**, for the host
+  image to supply at load time;
+- **no Qt**, no generated Qt-plugin glue and no logos-protocol archive is
+  linked in.
+
+It is the build shape shared by the iOS embedded framework and the Wasm host.
+Desktop targets today: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
+
+Who gets one: exactly the modules `parseMetadata` marks
+`packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
+and core `interface: "universal"` modules, i.e. those whose own image already
+exports the module-impl C ABI. A `type: ui_qml` view backend derives a Qt
+SimpleSource and an `interface: "legacy"` module is hand-written Qt; both are
+Qt plugin objects holding a `LogosAPI`, so neither exposes a `bare` attribute
+at all.
+
+The artifact is cut from the module's own `generate` output — the tree after
+every code generator has run — so `bare` and the plugin compile the same
+sources; `bare` just leaves the Qt ones out. Building `bare` never builds the
+plugin.
+
+**The gate.** Every `bare` derivation runs `scripts/logos-bare-gate.sh` as its
+install check and fails if the linker did not agree with the description above:
+a missing module-impl ABI export, any Qt symbol (mangled or moc-generated), a
+**defined** `lp_*` (meaning the logos-protocol archive was linked), a
+logos-protocol internal symbol, or a Qt / logos-protocol library in the load
+commands (`otool -L` on Mach-O, `DT_NEEDED` on ELF). Each failure names the
+offending symbol or library. The gate is a plain script and can be run by hand:
+
+```bash
+nix build .#bare
+LOGOS_MODULE_IMPL_EXPORTS=$(nix build --no-link --print-out-paths \
+  'github:logos-co/logos-protocol#module-impl-abi')/exports.txt \
+  ./scripts/logos-bare-gate.sh result/lib/my_module_bare.dylib
+```
+
+`LOGOS_MODULE_IMPL_EXPORTS` is required: the gate refuses to run without a
+non-empty export list rather than pass an artifact against an ABI it never
+checked.
 
 ### Example
 

@@ -13,10 +13,26 @@ let
   # Import the metadata parser (reads metadata.json)
   parseMetadata = import ./parseMetadata.nix { inherit lib; };
 
+  # Import the Bare module builder (the protocol-free artifact + its gate).
+  # Backend-agnostic on purpose: a Bare module has no Qt plugin in it, so it is
+  # built here rather than delegated to a plugin backend.
+  buildBareModule = import ./buildBareModule.nix { inherit lib; };
+
+  # logos-protocol publishes the module-impl C ABI export list as
+  # packages.<sys>.module-impl-abi. The Bare-module gate and the ABI tests read
+  # it from there rather than keeping a copy that could go stale.
+  moduleImplAbiFor = system:
+    logos-protocol.packages.${system}.module-impl-abi
+      or (throw ("logos-module-builder: the pinned logos-protocol predates "
+        + "packages.<sys>.module-impl-abi, so the declared module-impl export "
+        + "list cannot be read. Bump the logos-protocol input — the list is "
+        + "published by the repo that owns the ABI precisely so no consumer "
+        + "has to keep its own copy."));
+
   # Import the core module builder (routes to the right backend by type)
   mkLogosModule = import ./mkLogosModule.nix {
     inherit nixpkgs nix-bundle-lgx nix-bundle-logos-module-install logos-standalone-app lib;
-    inherit common parseMetadata builderRoot uiBackend coreBackend;
+    inherit common parseMetadata builderRoot uiBackend coreBackend buildBareModule moduleImplAbiFor;
     inherit logos-cpp-sdk logos-protocol logos-qt-sdk logos-module logos-test-framework logos-rust-sdk;
     inherit logos-plugin-qt;
     # The view (ui_qml) authoring flavour: source of the LogosView*.in
@@ -63,6 +79,8 @@ in {
 
   # Lower-level builders for advanced use cases
   inherit mkExternalLib;
+  inherit buildBareModule;     # the Bare module artifact (protocol-free)
+  inherit moduleImplAbiFor;    # logos-protocol's published module-impl ABI
 
   # Utilities
   inherit parseMetadata;
