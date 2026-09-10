@@ -18,4 +18,12 @@ public:
     int64_t increment(int64_t amount);
     int64_t current();
     void reset();
+
+logos_events:
+    // The counter's one event, and the reason it has one: the Native container
+    // drives a Bare module through the emit callback of the module-impl C ABI,
+    // and only a module that actually emits proves that half reaches a
+    // subscriber. Declared here so the generated cdylib sidecar emits the
+    // typed body -- nothing in the Bare artifact is hand-written.
+    void counted(int64_t value);
 };
