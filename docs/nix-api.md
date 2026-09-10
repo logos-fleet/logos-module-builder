@@ -370,7 +370,6 @@ Android platform refuses any other STL and the Native container's APK therefore
 packages it, and `liblogos_protocol.so`, the empty host-ABI stub's soname the
 host image supplies.
 
-
 ### Example
 
 ```nix

@@ -54,8 +54,8 @@ let
   ];
 
   iosCases = lib.concatMapStrings (m: ''
-    check_ios ${m.mobile.aarch64-ios-simulator.bare} 7 "${m.stem} iOS simulator" ${m.stem}
-    check_ios ${m.mobile.aarch64-ios.bare} 2 "${m.stem} iOS device" ${m.stem}
+    check_ios ${m.mobile.aarch64-ios-simulator.bare} 7 ${m.stem} "iOS simulator"
+    check_ios ${m.mobile.aarch64-ios.bare} 2 ${m.stem} "iOS device"
   '') modules;
 
   androidCases = lib.concatMapStrings (m: ''
@@ -103,7 +103,8 @@ pkgs.runCommand "bare-modules-mobile-tests" {
   mkdir -p $out
 
   check_ios() {
-    local root="$1" want_platform="$2" label="$3" stem="$4"
+    local root="$1" want_platform="$2" stem="$3" what="$4"
+    local label="$stem $what"
     local fw="$root/Library/Frameworks/$stem.framework"
     local bin="$fw/$stem"
 

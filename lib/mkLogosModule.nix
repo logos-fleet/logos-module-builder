@@ -1208,13 +1208,12 @@ let
           # A Go core is staged into the generate tree as an archive compiled
           # for the BUILD platform. Unlike the Rust core below, nothing here
           # rebuilds it. Refuse by name rather than fail in the linker.
-          refuseNonCpp = lang:
-            throw ("logos-module-builder: module '" + mobileConfig.name + "' has a " + lang
-                   + " core, and its compiled archive is staged into the `generate` tree "
-                   + "for the BUILD platform. Cross-compiling it for " + system
-                   + " needs a " + lang + " cross toolchain wired into the builder, "
-                   + "which this slice does not do. The C++ and Rust Bare shapes "
-                   + "cross today.");
+          refuseGoCore = throw ("logos-module-builder: module '" + mobileConfig.name
+            + "' has a Go core, and its compiled archive is staged into the "
+            + "`generate` tree for the BUILD platform. Cross-compiling it for "
+            + system + " needs a Go cross toolchain wired into the builder, "
+            + "which this slice does not do. The C++ and Rust Bare shapes "
+            + "cross today.");
 
           # `nix.external_libraries` are staged into lib/ by the generate step
           # as BUILD-PLATFORM images, and unlike a Rust core there is nothing
@@ -1226,8 +1225,7 @@ let
           # forty lines into a link command, naming neither whose library it is
           # nor what would fix it. (Measured on package_manager_module, whose
           # external `lgx` is exactly this case.)
-          externalLibNames =
-            map (e: e.name or (toString e)) mobileConfig.external_libraries;
+          externalLibNames = mkExternalLib.getExternalLibNames mobileConfig;
           refuseExternalLibs = throw ("logos-module-builder: module '"
             + mobileConfig.name + "' cannot be built as a Bare module for " + system
             + " yet: it declares nix.external_libraries ("
@@ -1376,8 +1374,8 @@ let
           # module is a Qt plugin object holding a LogosAPI and has no
           # protocol-free form to extract.
           bare =
-            if mobileConfig.external_libraries != [ ] then refuseExternalLibs
-            else if mobileConfig.go_static_lib_names != [ ] then refuseNonCpp "Go"
+            if mkExternalLib.hasExternalLibs mobileConfig then refuseExternalLibs
+            else if mobileConfig.go_static_lib_names != [ ] then refuseGoCore
             else buildBareModule {
               inherit pkgs builderRoot;
               config = mobileConfig;
