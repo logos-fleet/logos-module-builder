@@ -241,8 +241,34 @@ let
       pkgs = mkPkgs system;
     });
 
+  # ── the mobile pseudo-systems ──────────────────────────────────────────
+  # Deliberately NOT in `systems`: they carry exactly one of a module's twenty
+  # outputs (the Bare module -- see ./mobileBare.nix), and an `stdenv.isDarwin`
+  # is true for an iOS host, so folding them in would misroute every native
+  # branch as well as demand nineteen outputs that have no mobile shape.
+  hasMobile = logos-nix != null && logos-nix ? lib.mkMobileTargets;
+
+  # Applies `f { system, pkgs, buildSystem }` over the three mobile targets.
+  # `androidBuildSystem` is a parameter because an Android derivation's
+  # `system` is its BUILD platform: the default x86_64-linux cannot be realised
+  # on a Mac even though aarch64-darwin builds the identical closure.
+  forAllMobileTargets = { androidBuildSystem ? "x86_64-linux" }: f:
+    if !hasMobile then
+      throw ("logos-module-builder: mobile Bare modules need a logos-nix that "
+             + "publishes lib.mkMobileTargets (the iOS and Android cross sets). "
+             + "Bump the logos-nix input.")
+    else
+      logos-nix.lib.mkForAllMobileTargets
+        (logos-nix.lib.mkMobileTargets { inherit androidBuildSystem; })
+        f;
+
+  # cargo's spelling of each mobile pseudo-system, from the repo that owns the
+  # platform decision rather than restated here.
+  mobileRustTargets = if hasMobile then logos-nix.lib.mobileRustTargets else { };
+
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
+  inherit hasMobile forAllMobileTargets mobileRustTargets;
   inherit classifyConcreteDeps;
 
   inherit collectAllModuleDeps;

@@ -374,6 +374,14 @@ function(logos_bare_module)
 
     add_library(${_BARE_TARGET} SHARED ${BARE_SOURCES} ${_BARE_GEN_CPPS})
 
+    # C++17 is the floor the SDK and protocol headers are written against
+    # (logos_codec.h uses std::optional and std::is_floating_point_v), and it
+    # is what logos-protocol's own CMakeLists sets. Stated here rather than
+    # inherited from the compiler's default: nixpkgs' toolchains happen to
+    # default to gnu++17, Xcode's clang targeting iOS does not, and the
+    # difference surfaces as forty template errors inside a header.
+    target_compile_features(${_BARE_TARGET} PRIVATE cxx_std_17)
+
     # A Bare module has no QObject in it — AUTOMOC is on directory-wide for the
     # plugin build, so turn it off here or cmake would demand Qt's moc.
     set_target_properties(${_BARE_TARGET} PROPERTIES
@@ -480,7 +488,14 @@ function(logos_bare_module)
             target_link_libraries(${_BARE_TARGET} PRIVATE
                 "-framework CoreFoundation" "-framework Security")
         else()
-            target_link_libraries(${_BARE_TARGET} PRIVATE pthread dl)
+            # NOT `pthread dl`: bionic has both inside libc and ships neither
+            # as a library, so a literal -lpthread fails the Android link with
+            # "unable to find library -lpthread". Threads::Threads and
+            # CMAKE_DL_LIBS are the portable spellings -- they expand to
+            # -lpthread / -ldl exactly where those files exist, and to nothing
+            # where the platform folds them into libc.
+            find_package(Threads REQUIRED)
+            target_link_libraries(${_BARE_TARGET} PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         endif()
     endif()
 
@@ -488,8 +503,15 @@ function(logos_bare_module)
         target_link_libraries(${_BARE_TARGET} PRIVATE ${lib})
     endforeach()
 
-    # lp_* stays undefined: that IS the Bare shape. ELF allows undefined symbols
-    # in a shared object by default; Mach-O has to be told.
+    # lp_* stays undefined: that IS the Bare shape. Both linkers have to be
+    # told so — ELF permits undefined symbols in a shared object by default,
+    # but a cross toolchain may have turned that default off. The NDK's
+    # android.toolchain.cmake does exactly that (`-Wl,--no-undefined` in
+    # CMAKE_SHARED_LINKER_FLAGS), and the link then fails on lp_token_save,
+    # lp_token_save_inbound and lp_grant_host_services — the three the host
+    # image exists to supply. `-z undefs` is the ELF twin of Mach-O's
+    # `-undefined dynamic_lookup`: it cancels `-z defs` / `--no-undefined`
+    # whether or not anything set it, so this is stated rather than assumed.
     if(APPLE)
         target_link_options(${_BARE_TARGET} PRIVATE -undefined dynamic_lookup)
         set_target_properties(${_BARE_TARGET} PROPERTIES
@@ -498,6 +520,7 @@ function(logos_bare_module)
             BUILD_WITH_INSTALL_NAME_DIR TRUE
         )
     else()
+        target_link_options(${_BARE_TARGET} PRIVATE "LINKER:-z,undefs")
         set_target_properties(${_BARE_TARGET} PROPERTIES
             INSTALL_RPATH "$ORIGIN"
             INSTALL_RPATH_USE_LINK_PATH FALSE

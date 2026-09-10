@@ -34,7 +34,18 @@ fi
 NM="${NM:-nm}"
 OTOOL="${OTOOL:-otool}"
 READELF="${READELF:-readelf}"
-OS=$(uname -s)
+
+# WHICH BINARY FORMAT, read off the artifact rather than off `uname`. The two
+# are not the same question the moment a Bare module is cross-compiled: a Mac
+# building the Android variant would otherwise reach for otool and hand an ELF
+# object to a Mach-O reader, and every clause below would silently gate nothing.
+case "$(od -An -tx1 -N4 "$ARTIFACT" | tr -d ' \n')" in
+    7f454c46)                   FORMAT=elf ;;   # \x7fELF
+    cffaedfe|cefaedfe|cafebabe) FORMAT=macho ;; # 64/32-bit and fat Mach-O
+    *)
+        echo "logos-bare-gate: FAIL — $ARTIFACT is neither ELF nor Mach-O" >&2
+        exit 1 ;;
+esac
 
 # ── the declared module-impl ABI ────────────────────────────────────────────
 # Every export declared in logos_module_impl.h must be DEFINED, whatever
@@ -67,9 +78,9 @@ fi
 # ── read the symbol table ───────────────────────────────────────────────────
 # Normalised to "<type> <name>" lines, with Mach-O's leading underscore and
 # ELF's @version suffix stripped so the rest of the script speaks one spelling.
-case "$OS" in
-    Darwin) raw_syms=$("$NM" -g "$ARTIFACT" 2>/dev/null) ;;
-    *)      raw_syms=$("$NM" -D "$ARTIFACT" 2>/dev/null) ;;
+case "$FORMAT" in
+    macho) raw_syms=$("$NM" -g "$ARTIFACT" 2>/dev/null) ;;
+    *)     raw_syms=$("$NM" -D "$ARTIFACT" 2>/dev/null) ;;
 esac
 if [ -z "$raw_syms" ]; then
     echo "logos-bare-gate: FAIL — could not read a symbol table from $ARTIFACT" >&2
@@ -129,10 +140,10 @@ fail_each "logos_protocol internal symbol in a Bare module" "$PROTOCOL_INTERNAL_
 
 # ── 4. no Qt / logos-protocol shared library in the load commands ───────────
 LIB_RE='libQt|Qt[A-Z][A-Za-z]*\.framework|libQt[0-9]|logos_protocol|logos-protocol|logos_qt_sdk|logos-qt-sdk'
-case "$OS" in
-    Darwin) linked=$("$OTOOL" -L "$ARTIFACT" 2>/dev/null | tail -n +2 | awk '{print $1}') ;;
-    *)      linked=$("$READELF" -d "$ARTIFACT" 2>/dev/null \
-                     | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }') ;;
+case "$FORMAT" in
+    macho) linked=$("$OTOOL" -L "$ARTIFACT" 2>/dev/null | tail -n +2 | awk '{print $1}') ;;
+    *)     linked=$("$READELF" -d "$ARTIFACT" 2>/dev/null \
+                    | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }') ;;
 esac
 fail_each "Bare module links a forbidden library" "$LIB_RE" "$linked"
 

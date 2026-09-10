@@ -2,7 +2,7 @@
 # This is the main entry point for building Logos modules.
 # Plugin compilation and header generation are delegated to a backend selected
 # by metadata.json "type": core modules use coreBackend, UI modules use uiBackend.
-{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, buildBareModule, moduleImplAbiFor, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
+{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, buildBareModule, moduleImplAbiFor, mobileBare, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
 
 {
   # Required: Path to the module source
@@ -1030,6 +1030,13 @@ let
       # re-runs (LogosModule.cmake consumes the pre-populated generated_code/).
       generate = moduleGenerate;
       "${config.name}-generate" = moduleGenerate;
+    } // lib.optionalAttrs isRustModule {
+      # The crate laid out for a build: the crate under rust-lib/ with the
+      # generated scaffold injected, and the builder's logos-rust-sdk source
+      # alongside it. Published because the MOBILE Bare module has to compile
+      # the same crate for its own target (./mobileBare.nix), and generating
+      # the scaffold once is what keeps all four targets on one rev of it.
+      "rust-crate-src" = rustCrateSrc;
     } // lib.optionalAttrs config.packaged_as_cdylib {
       # The Bare module artifact — gated at build time by
       # scripts/logos-bare-gate.sh (protocol-free or no derivation).
@@ -1223,6 +1230,27 @@ let
     sysPkgs // (optionalLgx.packages.${system} or {})
   ) packages;
 
+  # ── the Bare module for iOS and Android ───────────────────────────────
+  # Keyed by mobile pseudo-system and merged onto `packages` below, exactly
+  # the way x86_64-windows is keyed -- so `packages.aarch64-ios.bare` reads
+  # like every other target. Only a shape that HAS a Bare module gets these:
+  # a Qt plugin object holding a LogosAPI has no protocol-free form to
+  # extract, on any platform.
+  #
+  # `mobileBarePackagesFor` is the same thing with the Android BUILD platform
+  # chosen by the caller: an Android derivation's `system` is its build
+  # platform, so the x86_64-linux one below cannot be realised on a Mac even
+  # though aarch64-darwin builds the identical closure.
+  mobileBareArgs = {
+    inherit src configFor;
+    packagesFor = system: finalPackages.${system};
+    inherit getPkg;
+  };
+  hasMobileBare = common.hasMobile && (configFor (lib.head common.systems)).packaged_as_cdylib;
+  mobileBarePackagesFor = args:
+    if !hasMobileBare then { } else mobileBare (mobileBareArgs // args);
+  mobileBarePackages = mobileBarePackagesFor { };
+
   # Build unit tests — explicit config wins, otherwise auto-detect tests/CMakeLists.txt
   mkTests = import ./mkLogosModuleTests.nix {
     inherit nixpkgs lib common parseMetadata;
@@ -1268,7 +1296,10 @@ let
   ) mergedPackages;
 
 in {
-  packages = finalPackages;
+  packages = finalPackages // mobileBarePackages;
+  # The mobile Bare modules with the Android build platform chosen by the
+  # caller; see mobileBarePackagesFor above for why that is a parameter.
+  inherit mobileBarePackagesFor;
   inherit devShells config;
   # The RESOLVED config, per target. `config` above cannot answer for a
   # platform-keyed field and says so when asked; a consumer that needs

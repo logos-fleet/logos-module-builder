@@ -218,8 +218,8 @@ Returns an attribute set with:
       install-portable = <portable install package>;  # always included
 
       # Only for `interface: "cdylib"` and core `interface: "universal"` modules:
-      bare = <Bare module artifact>;
-      <name>-bare = <Bare module artifact>;
+      bare = <Bare module artifact>;          # also under packages.aarch64-ios,
+      <name>-bare = <Bare module artifact>;   # .aarch64-ios-simulator, .aarch64-android
 
       # Only when externalLibInputs uses structured format with variants:
       <name>-lib-portable = <portable library package>;
@@ -256,7 +256,8 @@ Returns an attribute set with:
   linked in.
 
 It is the build shape shared by the iOS embedded framework and the Wasm host.
-Desktop targets today: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
+`<name>_bare.dylib` / `<name>_bare.so` under `lib/`, for the native system and
+for the three mobile targets below.
 
 Who gets one: exactly the modules `parseMetadata` marks
 `packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
@@ -271,8 +272,8 @@ every code generator has run — so `bare` and the plugin compile the same
 sources; `bare` just leaves the Qt ones out. Building `bare` never builds the
 plugin.
 
-**The gate.** Every `bare` derivation runs `scripts/logos-bare-gate.sh` as its
-install check and fails if the linker did not agree with the description above:
+**The gate.** Every `bare` derivation runs `scripts/logos-bare-gate.sh` in its
+`postFixup` and fails if the linker did not agree with the description above:
 a missing module-impl ABI export, any Qt symbol (mangled or moc-generated), a
 **defined** `lp_*` (meaning the logos-protocol archive was linked), a
 logos-protocol internal symbol, or a Qt / logos-protocol library in the load
@@ -289,6 +290,63 @@ LOGOS_MODULE_IMPL_EXPORTS=$(nix build --no-link --print-out-paths \
 `LOGOS_MODULE_IMPL_EXPORTS` is required: the gate refuses to run without a
 non-empty export list rather than pass an artifact against an ABI it never
 checked.
+
+The gate runs in `postFixup`, not in `installCheckPhase`, and that is
+load-bearing rather than stylistic: nixpkgs computes `doInstallCheck &&
+buildPlatform.canExecute hostPlatform`, so under any cross build the phase is
+skipped without a word. This gate reads a symbol table and never runs the
+artifact, so there is nothing for that rule to protect against here — and the
+shape it would otherwise produce is the worst one available, three mobile Bare
+modules that report themselves gated and were not.
+
+#### Mobile: `packages.aarch64-ios{,-simulator}.bare`, `packages.aarch64-android.bare`
+
+The Bare module is the ONE module output that crosses to mobile, precisely
+because it carries no Qt: an iOS app loads an embedded framework and an APK
+loads a `.so`, neither of which is a Qt plugin, so the other twenty outputs
+(the plugin, `lgx`, `install`, `unit-tests`, the `ui_qml` view) have no mobile
+shape at all. The three mobile pseudo-systems are therefore keyed onto
+`packages` the way `x86_64-windows` is, rather than added to the builder's
+`systems` list:
+
+```bash
+nix build .#packages.aarch64-ios.bare            # arm64-apple-ios, device
+nix build .#packages.aarch64-ios-simulator.bare  # arm64-apple-ios-simulator
+nix build .#packages.aarch64-android.bare        # arm64-v8a, API 28
+```
+
+What crosses and what does not:
+
+- `generate` is **source**, and is taken from the build platform unchanged.
+  Its one target-specific corner is `lib/`, where the generate step staged a
+  build-platform Rust archive; the cross archive replaces it.
+- logos-cpp-sdk and logos-protocol are consumed as **headers** by a bare build
+  (`logos_bare_module()` adds include directories and links neither), so the
+  build-platform packages are correct and nothing has to be cross-built.
+- A `codegen.rust` module's crate **is** recompiled for the target, with a
+  rust-overlay toolchain that runs on the builder and has the target's std
+  added (`logos-nix`'s `lib.mobileRustTargets` names the cargo triple). The
+  toolchain wiring — linker, `cc-rs` `CC_`/`AR_`/`CFLAGS_`, the SDK — comes
+  from the target package set as `pkgs.logosRustCrossSetup`, contributed by
+  both mobile overlays under the same name.
+
+An Android derivation's `system` attribute is its BUILD platform, so
+`packages.aarch64-android.*` is pinned to x86_64-linux and cannot be realised
+on a Mac even though aarch64-darwin builds the identical closure. To verify it
+from a Mac, ask for that build platform explicitly:
+
+```nix
+(mkLogosModule { ... }).mobileBarePackagesFor { androidBuildSystem = "aarch64-darwin"; }
+```
+
+**The Android gate.** On top of the Bare-module gate, every
+`aarch64-android` artifact is run through logos-nix's
+`logos-android-dt-needed-gate`: a `DT_NEEDED` soname that is neither shipped
+beside the artifact nor guaranteed by Android at the app's API level fails the
+build rather than the phone (where it surfaces as an `UnsatisfiedLinkError`
+naming one soname and none of the reason). `libc++_shared.so` is allowed by
+name, because Qt's Android platform refuses any other STL and the Native
+container's APK therefore packages it.
 
 ### Example
 

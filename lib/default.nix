@@ -29,10 +29,18 @@ let
         + "published by the repo that owns the ABI precisely so no consumer "
         + "has to keep its own copy."));
 
+  # The mobile (iOS / Android) flavour of the Bare module output. Its own file
+  # for the reason its header gives: the Bare module is the ONE output of a
+  # module that has a mobile shape, so it does not belong in `common.systems`.
+  mobileBare = import ./mobileBare.nix {
+    inherit lib common buildBareModule moduleImplAbiFor builderRoot;
+    inherit logos-cpp-sdk logos-protocol rust-overlay;
+  };
+
   # Import the core module builder (routes to the right backend by type)
   mkLogosModule = import ./mkLogosModule.nix {
     inherit nixpkgs nix-bundle-lgx nix-bundle-logos-module-install logos-standalone-app lib;
-    inherit common parseMetadata builderRoot uiBackend coreBackend buildBareModule moduleImplAbiFor;
+    inherit common parseMetadata builderRoot uiBackend coreBackend buildBareModule moduleImplAbiFor mobileBare;
     inherit logos-cpp-sdk logos-protocol logos-qt-sdk logos-module logos-test-framework logos-rust-sdk;
     inherit logos-plugin-qt;
     # The view (ui_qml) authoring flavour: source of the LogosView*.in

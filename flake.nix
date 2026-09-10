@@ -2,6 +2,14 @@
   description = "Logos Module Builder - Shared library for building Logos modules with minimal boilerplate";
 
   inputs = {
+    # LOCKED TO THE logos-fleet FORK, not to this URL: the mobile Bare module
+    # outputs (lib/mobileBare.nix) need logos-nix's lib.mkMobileTargets /
+    # lib.mobileRustTargets, the iOS and Android cross overlays' four
+    # logos{Rust,Nim}Cross* attributes, and logosAndroidDtNeededGate -- none of
+    # which are upstream yet. `nix flake update` would silently move this back
+    # to logos-co and `packages.aarch64-ios.bare` would stop evaluating.
+    # Re-pin with
+    #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     # Optional newer rustc for crates whose deps out-pace the nixpkgs rustc
     # (opt-in per module via metadata `nix.rust.toolchain`).
@@ -340,6 +348,19 @@
           gateScript = ./scripts/logos-bare-gate.sh;
           # The same published export list the gate itself reads.
           moduleImplAbi = lib.moduleImplAbiFor system;
+        };
+      }
+      # The same three shapes cross-built for iOS and Android. Not folded into
+      # `bare-modules` above: it needs Xcode for the iOS half and the NDK for
+      # the Android one, so on a system that has neither there is nothing to
+      # check rather than something to skip silently. aarch64-darwin builds all
+      # three targets; x86_64-linux builds Android only (only a Mac can produce
+      # an iOS image at all).
+      // nixpkgs.lib.optionalAttrs (builtins.elem system [ "aarch64-darwin" "x86_64-linux" ]) {
+        mobile-bare = import ./tests/test-mobile-bare.nix {
+          inherit pkgs;
+          mkLogosModule = lib.mkLogosModule;
+          fixturesRoot = ./tests/fixtures;
         };
       });
 
