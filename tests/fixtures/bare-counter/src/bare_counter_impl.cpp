@@ -22,3 +22,8 @@ void BareCounterImpl::reset()
 {
     g_value = 0;
 }
+
+int64_t BareCounterImpl::add(int64_t a, int64_t b)
+{
+    return a + b;
+}

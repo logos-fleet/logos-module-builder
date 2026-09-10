@@ -21,14 +21,24 @@
 # the headline selector {"os":"windows","architecture":"x86_64","abi":"gnu"}
 # would match nothing on the one platform this workspace cross-builds for, and
 # every Windows overlay in the tree would be silently inert.
+#
+# The mobile rows are here for the same reason and one more: an iOS host is
+# `stdenv.isDarwin`, and `aarch64-android`'s host triple is aarch64/linux —
+# both are one field away from a row that already exists, so a wrong one would
+# match a REAL selector rather than nothing at all.
 { assertEq, common, parseMetadata }:
 
 let
-  actualFor = system:
-    parseMetadata.platformOf (common.mkPkgs system).stdenv.hostPlatform;
+  actualFor = pkgs: parseMetadata.platformOf pkgs.stdenv.hostPlatform;
+  check = system: pkgs:
+    assertEq "platformTriples row for ${system} matches the real package set"
+      (parseMetadata.platformForSystem system)
+      (actualFor pkgs);
 in
-map (system:
-  assertEq "platformTriples row for ${system} matches the real package set"
-    (parseMetadata.platformForSystem system)
-    (actualFor system)
-) common.systems
+map (system: check system (common.mkPkgs system)) common.systems
+++ map (target: check target (common.mkMobilePkgs {
+     inherit target;
+     # Either member of androidBuildSystems produces the same HOST triple, and
+     # this is a claim about the host.
+     androidBuildSystem = "aarch64-darwin";
+   })) common.mobileSystems

@@ -256,7 +256,7 @@ Returns an attribute set with:
   linked in.
 
 It is the build shape shared by the iOS embedded framework and the Wasm host.
-Desktop targets today: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
+Desktop targets: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
 
 Who gets one: exactly the modules `parseMetadata` marks
 `packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
@@ -289,6 +289,47 @@ LOGOS_MODULE_IMPL_EXPORTS=$(nix build --no-link --print-out-paths \
 `LOGOS_MODULE_IMPL_EXPORTS` is required: the gate refuses to run without a
 non-empty export list rather than pass an artifact against an ABI it never
 checked.
+
+The gate picks its reader off the ARTIFACT's magic bytes, not off `uname`, so
+it reads an Android `.so` correctly while running on a Mac; hand it a
+`.framework` directory and it resolves the Mach-O inside.
+
+#### The mobile keys
+
+The same `bare` output, cross-compiled:
+
+```bash
+nix build .#packages.aarch64-ios.bare            # iPhone / iPad
+nix build .#packages.aarch64-ios-simulator.bare  # the simulator
+nix build .#packages.aarch64-android.bare        # arm64-v8a
+```
+
+These three keys are **pseudo-systems** (a cross derivation's `system` is its
+BUILD platform) and they carry `bare` and nothing else — there is no Qt plugin
+host on a phone, which is the reason the Bare module exists. They appear only
+when the builder's `logos-nix` input has the mobile targets.
+
+| target | artifact |
+|---|---|
+| `aarch64-ios`, `aarch64-ios-simulator` | `Library/Frameworks/<name>_bare.framework/` — a flat embedded framework with an `Info.plist`, install_name `@rpath/<name>_bare.framework/<name>_bare`. Copy it into `<App>.app/Frameworks/` with Code Sign On Copy. |
+| `aarch64-android` | `lib/lib<name>_bare.so`, SONAME to match — an APK carries only `lib*.so`. |
+
+`_bare` survives into the installed filename on every platform on purpose:
+liblogos identifies a Bare module by that stem suffix.
+
+Two things the mobile keys do NOT do, and say so rather than guessing:
+
+- a `codegen.rust` or Go module is refused by name. Its compiled core is staged
+  into the `generate` tree for the BUILD platform, so cross-linking it needs a
+  Rust/Go cross toolchain that is not wired in;
+- `packages.aarch64-android` is built from logos-nix's canonical Android build
+  platform (`x86_64-linux`), which a Mac cannot realise. For the other one use
+  `legacyPackages.<buildSystem>.mobile.aarch64-android.bare` —
+  e.g. `legacyPackages.aarch64-darwin.mobile.aarch64-android.bare`.
+
+The generated sources come from the BUILD platform's `generate` output: a code
+generator is a host tool, so the mobile artifact is a cross COMPILE of exactly
+the tree the native one compiles.
 
 ### Example
 

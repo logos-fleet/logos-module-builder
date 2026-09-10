@@ -126,6 +126,67 @@ let
 
   mkPkgs = mkPkgsWith [ ];
 
+  # ── mobile ────────────────────────────────────────────────────────────────
+  # The iOS and Android pseudo-systems, keyed exactly as logos-nix keys them.
+  #
+  # DELIBERATELY NOT IN `systems`. A module's `packages.<system>` carries a
+  # dozen outputs — the Qt plugin, its two header variants, the LGX bundles,
+  # the standalone app — and not one of them has a mobile meaning: there is no
+  # Qt plugin host on a phone, which is the whole reason the Bare module exists.
+  # Folding these keys into `systems` would make every one of those attributes
+  # EXIST and fail only when forced, which is the shape of bug that reaches a
+  # consumer. mkLogosModule merges a mobile-only attrset (just `bare`) onto
+  # `packages` instead, the same way logos-liblogos and logos-basecamp do.
+  #
+  # A logos-nix WITHOUT the mobile helpers is the expected off state, not an
+  # error: `nix flake update` walking the input back to an upstream rev is all
+  # it takes (see the note on the input in flake.nix). Everything mobile then
+  # degrades to empty rather than throwing on an attribute that is not there,
+  # which is what this one predicate buys.
+  hasMobileSupport = logos-nix != null && logos-nix ? lib.mkIosPkgs;
+
+  mobileSystems =
+    if hasMobileSupport then [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ]
+    else [ ];
+
+  # The build platform each mobile target is produced FROM.
+  #
+  # iOS: only aarch64-darwin can build it at all (Xcode). Android: either
+  # member of logos-nix's androidBuildSystems, and the choice is REAL, because
+  # a cross derivation's `system` is its BUILD platform — `packages.aarch64-android`
+  # built from x86_64-linux cannot be realised on a Mac even though the Mac can
+  # build the identical closure. Hence the parameter, and hence
+  # `legacyPackages.<buildSystem>.mobile` on mkLogosModule's result for a
+  # caller that needs the other one.
+  androidBuildSystems =
+    if hasMobileSupport then logos-nix.lib.androidBuildSystems else [ ];
+
+  defaultAndroidBuildSystem =
+    if androidBuildSystems == [ ] then "x86_64-linux"
+    else lib.head androidBuildSystems;
+
+  mobileBuildSystemFor = androidBuildSystem: target:
+    if target == "aarch64-android" then androidBuildSystem else "aarch64-darwin";
+
+  mkMobilePkgs = { target, androidBuildSystem ? defaultAndroidBuildSystem }:
+    let buildSystem = mobileBuildSystemFor androidBuildSystem target; in
+    if !hasMobileSupport then
+      throw ("logos-module-builder: targeting ${target} requires a logos-nix "
+             + "input that carries the mobile helpers (lib.mkIosPkgs, "
+             + "lib.mkAndroidPkgs, lib.androidBuildSystems).")
+    else if target == "aarch64-android" then
+      logos-nix.lib.mkAndroidPkgs { inherit buildSystem; }
+    else
+      logos-nix.lib.mkIosPkgs { inherit target buildSystem; };
+
+  # f { system, pkgs, buildSystem } over every mobile target.
+  forAllMobileSystems = { androidBuildSystem ? defaultAndroidBuildSystem }: f:
+    lib.genAttrs mobileSystems (target: f {
+      system = target;
+      pkgs = mkMobilePkgs { inherit target androidBuildSystem; };
+      buildSystem = mobileBuildSystemFor androidBuildSystem target;
+    });
+
   # The build platform Windows artifacts are produced FROM.
   #
   # Single-sourced from logos-nix, which owns the decision and the reasoning
@@ -243,6 +304,8 @@ let
 
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
+  inherit mobileSystems mkMobilePkgs forAllMobileSystems;
+  inherit androidBuildSystems defaultAndroidBuildSystem;
   inherit classifyConcreteDeps;
 
   inherit collectAllModuleDeps;
