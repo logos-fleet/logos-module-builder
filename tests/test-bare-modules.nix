@@ -1,19 +1,19 @@
 # Integration test for the `bare` output — the Bare module artifact.
 #
-# Builds it for the three authoring shapes that must produce one and inspects
-# the result with nm, rather than trusting the build log:
+# Builds it for the three authoring shapes that must produce one:
 #
-#   bare_counter          leaf universal C++ module (the counter) — the whole
-#                         module-impl C ABI is exported and no Qt is present
-#   bare_relay            universal C++ module with a dependency — its
-#                         modules().bare_counter calls leave `lp_invoke`
-#                         UNDEFINED, which is the Bare shape's defining property
+#   bare_counter            leaf universal C++ module (the counter)
+#   bare_relay              universal C++ module with a dependency — its
+#                           modules().bare_counter calls leave `lp_invoke`
+#                           UNDEFINED, which is the Bare shape's defining property
 #   rust_native_dep_module  a codegen.rust module — the same ABI, exported out
-#                         of the Rust core rather than a C++ impl
+#                           of the Rust core rather than a C++ impl
 #
-# Every one of these derivations already ran scripts/logos-bare-gate.sh as its
-# installCheck, so realising them at all is most of the assertion; the checks
-# below pin the specific claims the acceptance criteria name.
+# Every one of these derivations ran scripts/logos-bare-gate.sh as its
+# installCheck, which already proves the whole module-impl C ABI is exported
+# and no Qt or logos-protocol code is carried. Realising them is therefore
+# most of the assertion; only the claims the gate does not make are checked
+# here, and the Qt plugin shapes are checked to expose no `bare` output at all.
 { pkgs, mkLogosModule, fixturesRoot }:
 
 let
@@ -36,7 +36,11 @@ let
   };
 
   system = pkgs.stdenv.hostPlatform.system;
-  libExt = if pkgs.stdenv.hostPlatform.isDarwin then "dylib" else "so";
+  isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+  libExt = if isDarwin then "dylib" else "so";
+  # Mach-O keeps every global in the regular table; ELF's dynamic table is
+  # the one that matters for a shared object.
+  nmTable = if isDarwin then "-g" else "-D";
 
   counterBare = counter.packages.${system}.bare;
   relayBare = relay.packages.${system}.bare;
@@ -60,65 +64,30 @@ let
     && noBare "a ui_qml view backend" "qml-module";
 
 in assert qtPluginsHaveNoBare; pkgs.runCommand "bare-modules-tests" {
-  nativeBuildInputs =
-    if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.darwin.cctools ] else [ pkgs.binutils ];
+  nativeBuildInputs = [ pkgs.stdenv.cc.bintools.bintools ];
 } ''
   set -euo pipefail
 
-  # Normalised "<type> <name>" symbol lines; Mach-O's leading underscore gone.
-  syms() {
-    case "$(uname -s)" in
-      Darwin) nm -g "$1" ;;
-      *)      nm -D "$1" ;;
-    esac | awk 'NF >= 2 { n = $NF; sub(/^_/, "", n); print $(NF-1), n }'
-  }
-  defined() { syms "$1" | awk '$1 != "U" && $1 != "u" { print $2 }'; }
-  undefined() { syms "$1" | awk '$1 == "U" || $1 == "u" { print $2 }'; }
-
-  ABI="logos_module_dispatch logos_module_get_methods logos_module_set_context \
-       logos_module_set_emit_callback logos_module_accept_token \
-       logos_module_get_protocol_version logos_module_string_free"
-
-  echo "=== bare_counter (universal C++, the counter) ==="
   counter_lib=${counterBare}/lib/bare_counter_bare.${libExt}
-  test -f "$counter_lib"
-  for sym in $ABI; do
-    defined "$counter_lib" | grep -qx "$sym" \
-      || { echo "FAIL: bare_counter does not export $sym"; exit 1; }
-  done
-  echo "PASS: the counter's bare artifact exports the whole module-impl C ABI"
-  if defined "$counter_lib" | grep -qE '^lp_'; then
-    echo "FAIL: bare_counter DEFINES an lp_* symbol (protocol archive linked)"; exit 1
-  fi
-  echo "PASS: no lp_* is defined in the counter"
-
-  echo "=== bare_relay (universal C++ with a dependency) ==="
   relay_lib=${relayBare}/lib/bare_relay_bare.${libExt}
-  test -f "$relay_lib"
-  for sym in $ABI; do
-    defined "$relay_lib" | grep -qx "$sym" \
-      || { echo "FAIL: bare_relay does not export $sym"; exit 1; }
-  done
-  # The point of the shape: the dependency call reaches the host's lp_* at load
-  # time, so it has to be undefined here.
-  undefined "$relay_lib" | grep -qx "lp_invoke" \
-    || { echo "FAIL: bare_relay does not reference lp_invoke as an UNDEFINED symbol"; \
-         echo "undefined symbols were:"; undefined "$relay_lib"; exit 1; }
-  echo "PASS: the relay leaves lp_invoke undefined for the host image"
-
-  echo "=== rust_native_dep_module (codegen.rust) ==="
   rust_lib=${rustBare}/lib/rust_native_dep_module_bare.${libExt}
-  test -f "$rust_lib"
-  for sym in $ABI; do
-    defined "$rust_lib" | grep -qx "$sym" \
-      || { echo "FAIL: the Rust module's bare artifact does not export $sym"; exit 1; }
-  done
-  echo "PASS: a Rust-core module exports the same module-impl C ABI"
+  test -f "$counter_lib" && test -f "$relay_lib" && test -f "$rust_lib"
+  echo "PASS: bare artifacts built and gated for universal C++ (leaf + dependent) and Rust"
+
+  # The relay's dependency calls reach the host's lp_* at load time, so
+  # lp_invoke has to be an UNDEFINED symbol here (Mach-O's leading underscore
+  # stripped).
+  undefined=$(nm ${nmTable} "$relay_lib" \
+    | awk '$(NF-1) == "U" || $(NF-1) == "u" { n = $NF; sub(/^_/, "", n); print n }')
+  grep -qx lp_invoke <<< "$undefined" \
+    || { echo "FAIL: bare_relay does not reference lp_invoke as an UNDEFINED symbol"; \
+         echo "undefined symbols were:"; echo "$undefined"; exit 1; }
+  echo "PASS: the relay leaves lp_invoke undefined for the host image"
 
   mkdir -p $out
   for f in "$counter_lib" "$relay_lib" "$rust_lib"; do
     echo "== $f" >> $out/symbols.txt
-    syms "$f" >> $out/symbols.txt
+    nm ${nmTable} "$f" >> $out/symbols.txt
   done
   echo "bare outputs verified for universal C++ (leaf + dependent) and Rust" > $out/results.txt
 ''

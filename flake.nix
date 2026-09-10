@@ -322,14 +322,7 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
           templatesRoot = ./templates;
-          moduleImplAbi =
-            logos-protocol.packages.${system}.module-impl-abi
-              or (throw ("logos-module-builder: the pinned logos-protocol "
-                + "predates packages.<sys>.module-impl-abi, so the declared "
-                + "module-impl export list cannot be read. Bump the "
-                + "logos-protocol input — the list is published by the repo "
-                + "that owns the ABI precisely so no consumer has to keep its "
-                + "own copy."));
+          moduleImplAbi = lib.moduleImplAbiFor system;
         };
         # Integration test: the `bare` output (the Bare module artifact) for a
         # universal C++ leaf, a universal C++ module with a dependency, and a
@@ -345,14 +338,8 @@
         bare-gate = import ./tests/test-bare-gate.nix {
           inherit pkgs;
           gateScript = ./scripts/logos-bare-gate.sh;
-          # Same published export list the gate itself reads — see the file
-          # header for why the test must not carry its own copy.
-          moduleImplAbi =
-            logos-protocol.packages.${system}.module-impl-abi
-              or (throw ("logos-module-builder: the pinned logos-protocol "
-                + "predates packages.<sys>.module-impl-abi, so the Bare-module "
-                + "gate cannot be tested against the declared export list. "
-                + "Bump the logos-protocol input."));
+          # The same published export list the gate itself reads.
+          moduleImplAbi = lib.moduleImplAbiFor system;
         };
       });
 

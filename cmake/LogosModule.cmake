@@ -190,43 +190,42 @@ function(logos_find_dependencies)
         set(_protocol_found TRUE)
     endif()
 
-    # logos-module (the Qt PluginInterface), logos-qt-sdk (the Qt developer
-    # layer) and logos-qt-host (the Qt host runtime) are the Qt half of a module
-    # build. A Bare build (LOGOS_MODULE_BARE) produces the protocol-free artifact
-    # and never compiles or links any of them, so it must not be forced to have
-    # them present — that absence is half the point of the output.
-    if(NOT _module_found AND NOT LOGOS_MODULE_BARE)
-        message(FATAL_ERROR "logos-module not found at ${LOGOS_MODULE_ROOT}. "
-                            "Set LOGOS_MODULE_ROOT environment variable or CMake variable.")
-    endif()
-
     if(NOT _cpp_sdk_found)
         message(FATAL_ERROR "logos-cpp-sdk not found at ${LOGOS_CPP_SDK_ROOT}. "
                             "Set LOGOS_CPP_SDK_ROOT environment variable or CMake variable.")
     endif()
-    if(NOT _qt_sdk_found AND NOT LOGOS_MODULE_BARE)
+    if(NOT _protocol_found)
+        message(FATAL_ERROR "logos-protocol not found at ${LOGOS_PROTOCOL_ROOT}. "
+                            "Set LOGOS_PROTOCOL_ROOT environment variable or CMake variable.")
+    endif()
+    message(STATUS "Found logos-cpp-sdk at: ${LOGOS_CPP_SDK_ROOT}")
+    message(STATUS "Found logos-protocol at: ${LOGOS_PROTOCOL_ROOT}")
+
+    # logos-module (the Qt PluginInterface), logos-qt-sdk (the Qt developer
+    # layer) and logos-qt-host (the Qt host runtime) are the Qt half of a module
+    # build. A Bare build (LOGOS_MODULE_BARE) never compiles or links any of
+    # them, so it is not required to have them — that absence is the point.
+    if(LOGOS_MODULE_BARE)
+        return()
+    endif()
+    if(NOT _module_found)
+        message(FATAL_ERROR "logos-module not found at ${LOGOS_MODULE_ROOT}. "
+                            "Set LOGOS_MODULE_ROOT environment variable or CMake variable.")
+    endif()
+    if(NOT _qt_sdk_found)
         message(FATAL_ERROR "logos-qt-sdk not found at ${LOGOS_QT_SDK_ROOT}. "
                             "Set LOGOS_QT_SDK_ROOT environment variable or CMake variable.")
     endif()
-    if(NOT _qt_host_found AND NOT LOGOS_MODULE_BARE)
+    if(NOT _qt_host_found)
         message(FATAL_ERROR "No Qt host runtime found. Set LOGOS_QT_HOST_ROOT to an "
                             "installed logos-qt-host prefix (or a logos-plugin-qt "
                             "checkout) via environment or CMake variable. "
                             "LOGOS_QT_SDK_ROOT is not a substitute: logos-qt-sdk no "
                             "longer carries the host runtime's headers.")
     endif()
-    if(NOT _protocol_found)
-        message(FATAL_ERROR "logos-protocol not found at ${LOGOS_PROTOCOL_ROOT}. "
-                            "Set LOGOS_PROTOCOL_ROOT environment variable or CMake variable.")
-    endif()
-
-    message(STATUS "Found logos-cpp-sdk at: ${LOGOS_CPP_SDK_ROOT}")
-    message(STATUS "Found logos-protocol at: ${LOGOS_PROTOCOL_ROOT}")
-    if(NOT LOGOS_MODULE_BARE)
-        message(STATUS "Found logos-module at: ${LOGOS_MODULE_ROOT}")
-        message(STATUS "Found logos-qt-sdk at: ${LOGOS_QT_SDK_ROOT}")
-        message(STATUS "Qt host runtime: logos-qt-host::logos_qt_host at ${LOGOS_QT_HOST_ROOT}")
-    endif()
+    message(STATUS "Found logos-module at: ${LOGOS_MODULE_ROOT}")
+    message(STATUS "Found logos-qt-sdk at: ${LOGOS_QT_SDK_ROOT}")
+    message(STATUS "Qt host runtime: logos-qt-host::logos_qt_host at ${LOGOS_QT_HOST_ROOT}")
 endfunction()
 
 #[=======================================================================[.rst:
@@ -260,6 +259,59 @@ macro(logos_find_qt)
     endif()
     find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core RemoteObjects)
 endmacro()
+
+# _logos_find_external_lib(<name> <out_lib> <out_include> <out_lib_dir>)
+#
+# Resolve one EXTERNAL_LIBS entry. LOGOS_EXT_ROOT_<NAME> (exported by the nix
+# dev shell, or any caller) points at a package root laid out as lib/ +
+# include/, e.g. a Nix store path; otherwise the module's flat ./lib/ staging
+# directory holds both the library and its headers. Shared is preferred over
+# static. <out_lib> is empty when nothing was found; <out_lib_dir> names where
+# the search happened, for the caller's error message.
+function(_logos_find_external_lib ext_lib out_lib out_include out_lib_dir)
+    string(TOUPPER "${ext_lib}" _ext_lib_upper)
+    set(_ext_root_var "LOGOS_EXT_ROOT_${_ext_lib_upper}")
+    if(DEFINED ENV{${_ext_root_var}})
+        set(_lib_dir "$ENV{${_ext_root_var}}/lib")
+        set(_include_dir "$ENV{${_ext_root_var}}/include")
+    else()
+        set(_lib_dir "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+        set(_include_dir "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+    endif()
+
+    # On Windows a shared library is TWO files: you LINK against the import
+    # library (lib<x>.dll.a under mingw) and SHIP the .dll.
+    if(WIN32)
+        set(_names lib${ext_lib}.dll.a ${ext_lib}.dll.a lib${ext_lib}.lib ${ext_lib}.lib lib${ext_lib}.dll ${ext_lib}.dll lib${ext_lib}.a ${ext_lib}.a)
+    elseif(APPLE)
+        set(_names lib${ext_lib}.dylib lib${ext_lib}.so ${ext_lib}.dylib ${ext_lib}.so lib${ext_lib}.a ${ext_lib}.a)
+    else()
+        set(_names lib${ext_lib}.so lib${ext_lib}.dylib ${ext_lib}.so ${ext_lib}.dylib lib${ext_lib}.a ${ext_lib}.a)
+    endif()
+    # Find the library (prefer shared, fall back to static).
+    find_library(${ext_lib}_PATH NAMES ${_names} PATHS ${_lib_dir} NO_DEFAULT_PATH)
+
+    set(${out_lib} "${${ext_lib}_PATH}" PARENT_SCOPE)
+    set(${out_include} "${_include_dir}" PARENT_SCOPE)
+    set(${out_lib_dir} "${_lib_dir}" PARENT_SCOPE)
+endfunction()
+
+# _logos_link_sdk_headers(<target>)
+#
+# The Qt-free base SDK headers (logos_module_context.h / logos_json.h /
+# logos_result.h → nlohmann_json include path): logos-cpp-sdk::logos_headers
+# from an installed SDK, or nlohmann_json directly from a source checkout.
+function(_logos_link_sdk_headers target)
+    if(EXISTS "${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk")
+        find_package(logos-cpp-sdk REQUIRED CONFIG
+            PATHS ${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk
+            NO_DEFAULT_PATH)
+        target_link_libraries(${target} PRIVATE logos-cpp-sdk::logos_headers)
+    else()
+        find_package(nlohmann_json REQUIRED)
+        target_link_libraries(${target} PRIVATE nlohmann_json::nlohmann_json)
+    endif()
+endfunction()
 
 #[=======================================================================[.rst:
 logos_bare_module
@@ -370,18 +422,7 @@ function(logos_bare_module)
         target_include_directories(${_BARE_TARGET} PRIVATE ${dir})
     endforeach()
 
-    # nlohmann_json is the only library a Bare C++ module needs (header-only).
-    # logos-cpp-sdk::logos_headers is an INTERFACE target that carries it plus
-    # the SDK include path; both are Qt-free.
-    if(EXISTS "${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk")
-        find_package(logos-cpp-sdk REQUIRED CONFIG
-            PATHS ${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk
-            NO_DEFAULT_PATH)
-        target_link_libraries(${_BARE_TARGET} PRIVATE logos-cpp-sdk::logos_headers)
-    else()
-        find_package(nlohmann_json REQUIRED)
-        target_link_libraries(${_BARE_TARGET} PRIVATE nlohmann_json::nlohmann_json)
-    endif()
+    _logos_link_sdk_headers(${_BARE_TARGET})
 
     foreach(target ${BARE_LINK_TARGETS})
         if(TARGET ${target})
@@ -393,65 +434,37 @@ function(logos_bare_module)
         endif()
     endforeach()
 
-    # External libraries — same lookup as the plugin build (staged in lib/ by
-    # the builder, or pointed at directly by LOGOS_EXT_ROOT_<NAME>).
     foreach(ext_lib ${BARE_EXTERNAL_LIBS})
-        string(TOUPPER "${ext_lib}" _ext_lib_upper)
-        set(_ext_root_var "LOGOS_EXT_ROOT_${_ext_lib_upper}")
-        if(DEFINED ENV{${_ext_root_var}})
-            set(EXT_LIB_DIR "$ENV{${_ext_root_var}}/lib")
-            set(EXT_INCLUDE_DIR "$ENV{${_ext_root_var}}/include")
-        else()
-            set(EXT_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-            set(EXT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-        endif()
-        if(APPLE)
-            set(EXT_LIB_NAMES lib${ext_lib}.dylib lib${ext_lib}.so ${ext_lib}.dylib ${ext_lib}.so lib${ext_lib}.a ${ext_lib}.a)
-        else()
-            set(EXT_LIB_NAMES lib${ext_lib}.so lib${ext_lib}.dylib ${ext_lib}.so ${ext_lib}.dylib lib${ext_lib}.a ${ext_lib}.a)
-        endif()
-        find_library(${ext_lib}_BARE_PATH NAMES ${EXT_LIB_NAMES} PATHS ${EXT_LIB_DIR} NO_DEFAULT_PATH)
-        if(${ext_lib}_BARE_PATH)
-            target_link_libraries(${_BARE_TARGET} PRIVATE ${${ext_lib}_BARE_PATH})
-            target_include_directories(${_BARE_TARGET} PRIVATE ${EXT_INCLUDE_DIR})
-        else()
+        _logos_find_external_lib(${ext_lib} _ext_path _ext_include _ext_lib_dir)
+        if(NOT _ext_path)
             message(FATAL_ERROR
-                "External library '${ext_lib}' was not found in ${EXT_LIB_DIR}. "
+                "External library '${ext_lib}' was not found in ${_ext_lib_dir}. "
                 "Refusing to build a Bare module with a missing dependency.")
         endif()
+        target_link_libraries(${_BARE_TARGET} PRIVATE ${_ext_path})
+        target_include_directories(${_BARE_TARGET} PRIVATE ${_ext_include})
     endforeach()
 
-    # Go and Rust static archives. Unlike the plugin, the Bare artifact has no
-    # Qt glue referencing the module-impl exports, so nothing would pull the
-    # archive members in: link them whole so the C ABI actually lands in the
-    # artifact (and the gate can see it).
+    # Go and Rust static archives, staged in lib/ by the builder. Unlike the
+    # plugin, the Bare artifact has no Qt glue referencing the module-impl
+    # exports, so nothing would pull the archive members in: link them whole so
+    # the C ABI actually lands in the artifact (and the gate can see it).
     set(_BARE_STATIC_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
     set(_BARE_WHOLE_ARCHIVES "")
-    foreach(_golib IN LISTS LOGOS_MODULE_GO_STATIC_LIBS)
-        if(NOT _golib STREQUAL "")
-            find_library(_LOGOS_BARE_GO_${_golib}
-                NAMES lib${_golib}.a lib${_golib}.lib ${_golib}.a ${_golib}.lib
+    foreach(_lang IN ITEMS GO RUST)
+        foreach(_archive_name IN LISTS LOGOS_MODULE_${_lang}_STATIC_LIBS)
+            find_library(_LOGOS_BARE_${_lang}_${_archive_name}
+                NAMES lib${_archive_name}.a lib${_archive_name}.lib ${_archive_name}.a ${_archive_name}.lib ${_archive_name}
                 PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH)
-            if(NOT _LOGOS_BARE_GO_${_golib})
-                message(FATAL_ERROR "Go static library '${_golib}' was not found in ${_BARE_STATIC_LIB_DIR}.")
-            endif()
-            list(APPEND _BARE_WHOLE_ARCHIVES ${_LOGOS_BARE_GO_${_golib}})
-        endif()
-    endforeach()
-    foreach(_rustlib IN LISTS LOGOS_MODULE_RUST_STATIC_LIBS)
-        if(NOT _rustlib STREQUAL "")
-            find_library(_LOGOS_BARE_RUST_${_rustlib}
-                NAMES lib${_rustlib}.a ${_rustlib}
-                PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH)
-            if(NOT _LOGOS_BARE_RUST_${_rustlib})
+            if(NOT _LOGOS_BARE_${_lang}_${_archive_name})
                 message(FATAL_ERROR
-                    "Rust static library '${_rustlib}' (a codegen.rust module) was not "
-                    "found in ${_BARE_STATIC_LIB_DIR}. The builder stages the compiled "
-                    "staticlib there before the link; this usually means the crate build "
-                    "or staging step did not run.")
+                    "${_lang} static library '${_archive_name}' was not found in "
+                    "${_BARE_STATIC_LIB_DIR}. The builder stages compiled archives there "
+                    "before the link; this usually means the external build or staging "
+                    "step did not run.")
             endif()
-            list(APPEND _BARE_WHOLE_ARCHIVES ${_LOGOS_BARE_RUST_${_rustlib}})
-        endif()
+            list(APPEND _BARE_WHOLE_ARCHIVES ${_LOGOS_BARE_${_lang}_${_archive_name}})
+        endforeach()
     endforeach()
 
     foreach(_archive IN LISTS _BARE_WHOLE_ARCHIVES)
@@ -918,49 +931,11 @@ function(logos_module)
         endif()
     endif()
 
-    # Qt-free base SDK headers (logos_module_context.h / logos_json.h /
-    # logos_result.h → nlohmann_json include path).
-    if(EXISTS "${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk")
-        find_package(logos-cpp-sdk REQUIRED CONFIG
-            PATHS ${LOGOS_CPP_SDK_ROOT}/lib/cmake/logos-cpp-sdk
-            NO_DEFAULT_PATH)
-        target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE logos-cpp-sdk::logos_headers)
-    else()
-        find_package(nlohmann_json REQUIRED)
-        target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE nlohmann_json::nlohmann_json)
-    endif()
+    _logos_link_sdk_headers(${MODULE_NAME}_module_plugin)
 
     # Handle external libraries
     foreach(ext_lib ${MODULE_EXTERNAL_LIBS})
-        # Allow nix dev shell (or any caller) to point directly at a store path
-        # by exporting LOGOS_EXT_ROOT_<NAME>=/nix/store/…, skipping the ./lib/ staging copy.
-        # The expected format is a package root laid out as lib/+include/ (a Nix
-        # derivation), unlike the ./lib/ fallback, which is one flat directory
-        # holding both the library and its headers.
-        string(TOUPPER "${ext_lib}" _ext_lib_upper)
-        set(_ext_root_var "LOGOS_EXT_ROOT_${_ext_lib_upper}")
-        if(DEFINED ENV{${_ext_root_var}})
-            set(EXT_LIB_DIR "$ENV{${_ext_root_var}}/lib")
-            set(EXT_INCLUDE_DIR "$ENV{${_ext_root_var}}/include")
-        else()
-            set(EXT_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-            set(EXT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-        endif()
-
-        # Find the library (prefer shared, fall back to static).
-        # On Windows a shared library is TWO files: you LINK against the import
-        # library (lib<x>.dll.a under mingw) and SHIP the .dll. Neither spelling
-        # appeared in these lists, so every external-library module failed to
-        # cross-compile with "was not found in .../lib".
-        if(WIN32)
-            set(EXT_LIB_NAMES lib${ext_lib}.dll.a ${ext_lib}.dll.a lib${ext_lib}.lib ${ext_lib}.lib lib${ext_lib}.dll ${ext_lib}.dll lib${ext_lib}.a ${ext_lib}.a)
-        elseif(APPLE)
-            set(EXT_LIB_NAMES lib${ext_lib}.dylib lib${ext_lib}.so ${ext_lib}.dylib ${ext_lib}.so lib${ext_lib}.a ${ext_lib}.a)
-        else()
-            set(EXT_LIB_NAMES lib${ext_lib}.so lib${ext_lib}.dylib ${ext_lib}.so ${ext_lib}.dylib lib${ext_lib}.a ${ext_lib}.a)
-        endif()
-
-        find_library(${ext_lib}_PATH NAMES ${EXT_LIB_NAMES} PATHS ${EXT_LIB_DIR} NO_DEFAULT_PATH)
+        _logos_find_external_lib(${ext_lib} ${ext_lib}_PATH EXT_INCLUDE_DIR EXT_LIB_DIR)
 
         if(${ext_lib}_PATH)
             target_link_libraries(${MODULE_NAME}_module_plugin PRIVATE ${${ext_lib}_PATH})

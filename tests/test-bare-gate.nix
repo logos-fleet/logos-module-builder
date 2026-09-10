@@ -44,25 +44,15 @@ in pkgs.runCommandCC "bare-gate-tests" {
   # Only the NAMES matter here — the gate reads nm, not signatures — so each
   # export becomes a trivial no-arg stub.
   gen_abi() {
-    echo '#include <cstdlib>'
-    echo '#include <cstring>'
-    echo '#include <string>'
     echo '#define EXPORT extern "C" __attribute__((visibility("default")))'
     echo '// The consumer ABI a Bare module leaves UNDEFINED for the host image.'
     echo 'extern "C" int lp_invoke(const char*, const char*, const char*, char**, char**);'
-    first=1
-    while read -r sym; do
-      sym=$(printf '%s' "$sym" | tr -d '[:space:]')
-      [ -n "$sym" ] || continue
-      if [ "$first" = 1 ]; then
-        # One stub actually calls lp_invoke, so a well-formed artifact carries
-        # it as an UNDEFINED symbol — the Bare shape's defining property.
-        echo "EXPORT void $sym(void) { lp_invoke(\"p\", \"m\", \"a\", nullptr, nullptr); }"
-        first=0
-      else
-        echo "EXPORT void $sym(void) {}"
-      fi
-    done < "$exports"
+    sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$exports" \
+      | while read -r sym; do echo "EXPORT void $sym(void) {}"; done
+    # One export beyond the declared list (clause 1 is subset-only) that calls
+    # lp_invoke, so a well-formed artifact carries it as an UNDEFINED symbol —
+    # the Bare shape's defining property.
+    echo 'EXPORT void bare_gate_probe(void) { lp_invoke("p", "m", "a", nullptr, nullptr); }'
   }
   gen_abi > abi.cpp
 
@@ -78,6 +68,7 @@ in pkgs.runCommandCC "bare-gate-tests" {
   mkdir -p qtcase
   { gen_abi
     cat <<'CPP'
+#include <string>
 #include <QString>
 // Deliberate Qt reference: this is what the gate exists to catch.
 extern "C" __attribute__((visibility("default"))) const char* qt_leak() {
