@@ -26,6 +26,22 @@ if [ -z "$ARTIFACT" ]; then
     echo "logos-bare-gate: usage: logos-bare-gate.sh <artifact>" >&2
     exit 2
 fi
+# An iOS Bare module is a FRAMEWORK BUNDLE, so the thing a caller has a path to
+# is a directory. Resolve it to the Mach-O inside rather than making every
+# caller know the layout; a flat iOS framework names its binary after the
+# bundle.
+if [ -d "$ARTIFACT" ]; then
+    case "$ARTIFACT" in
+        *.framework | *.framework/)
+            bundle="${ARTIFACT%/}"
+            ARTIFACT="$bundle/$(basename "$bundle" .framework)"
+            ;;
+        *)
+            echo "logos-bare-gate: $ARTIFACT is a directory and not a .framework bundle" >&2
+            exit 2
+            ;;
+    esac
+fi
 if [ ! -f "$ARTIFACT" ]; then
     echo "logos-bare-gate: no such artifact: $ARTIFACT" >&2
     exit 2
@@ -34,7 +50,30 @@ fi
 NM="${NM:-nm}"
 OTOOL="${OTOOL:-otool}"
 READELF="${READELF:-readelf}"
-OS=$(uname -s)
+
+# ── which object format the ARTIFACT is ─────────────────────────────────────
+# Read from the file's magic bytes, never from `uname`. The gate now runs over
+# CROSS-BUILT artifacts -- an Android .so produced on a Mac, an iOS framework
+# produced on the same Mac -- and on that machine `uname -s` says Darwin for
+# both. Keying the toolchain off the builder would run `otool -L` on an ELF and
+# `readelf -d` on a Mach-O; the first reads nothing (a false FAIL) and the
+# second reads nothing (a false PASS on clause 4, the load-command check).
+#
+# od rather than `file`: it is in coreutils, which every one of these build
+# environments already has, and the answer is four bytes.
+magic=$(od -An -tx1 -N4 "$ARTIFACT" 2>/dev/null | tr -d ' \n')
+case "$magic" in
+    7f454c46)                     FORMAT=elf ;;   # \x7fELF
+    cffaedfe|cefaedfe)            FORMAT=macho ;; # MH_MAGIC_64 / MH_MAGIC, LE
+    feedfacf|feedface)            FORMAT=macho ;; # ...BE, and fat headers below
+    cafebabe|bebafeca)            FORMAT=macho ;; # universal binary
+    4d5a*)                        FORMAT=pe ;;    # MZ
+    *)
+        echo "logos-bare-gate: FAIL -- $ARTIFACT is not an object file this gate" \
+             "can read (magic $magic)" >&2
+        exit 1
+        ;;
+esac
 
 # ── the declared module-impl ABI ────────────────────────────────────────────
 # Every export declared in logos_module_impl.h must be DEFINED, whatever
@@ -67,9 +106,9 @@ fi
 # ── read the symbol table ───────────────────────────────────────────────────
 # Normalised to "<type> <name>" lines, with Mach-O's leading underscore and
 # ELF's @version suffix stripped so the rest of the script speaks one spelling.
-case "$OS" in
-    Darwin) raw_syms=$("$NM" -g "$ARTIFACT" 2>/dev/null) ;;
-    *)      raw_syms=$("$NM" -D "$ARTIFACT" 2>/dev/null) ;;
+case "$FORMAT" in
+    macho) raw_syms=$("$NM" -g "$ARTIFACT" 2>/dev/null) ;;
+    *)     raw_syms=$("$NM" -D "$ARTIFACT" 2>/dev/null) ;;
 esac
 if [ -z "$raw_syms" ]; then
     echo "logos-bare-gate: FAIL — could not read a symbol table from $ARTIFACT" >&2
@@ -129,9 +168,9 @@ fail_each "logos_protocol internal symbol in a Bare module" "$PROTOCOL_INTERNAL_
 
 # ── 4. no Qt / logos-protocol shared library in the load commands ───────────
 LIB_RE='libQt|Qt[A-Z][A-Za-z]*\.framework|libQt[0-9]|logos_protocol|logos-protocol|logos_qt_sdk|logos-qt-sdk'
-case "$OS" in
-    Darwin) linked=$("$OTOOL" -L "$ARTIFACT" 2>/dev/null | tail -n +2 | awk '{print $1}') ;;
-    *)      linked=$("$READELF" -d "$ARTIFACT" 2>/dev/null \
+case "$FORMAT" in
+    macho) linked=$("$OTOOL" -L "$ARTIFACT" 2>/dev/null | tail -n +2 | awk '{print $1}') ;;
+    *)     linked=$("$READELF" -d "$ARTIFACT" 2>/dev/null \
                      | awk '/NEEDED/ { gsub(/[][]/, "", $NF); print $NF }') ;;
 esac
 fail_each "Bare module links a forbidden library" "$LIB_RE" "$linked"
@@ -141,4 +180,4 @@ if [ "$failures" -gt 0 ]; then
     exit 1
 fi
 
-echo "logos-bare-gate: PASS — $(basename "$ARTIFACT") exports the module-impl ABI, references no Qt, and carries no logos-protocol code."
+echo "logos-bare-gate: PASS — $(basename "$ARTIFACT") ($FORMAT) exports the module-impl ABI, references no Qt, and carries no logos-protocol code."

@@ -2,6 +2,12 @@
   description = "Logos Module Builder - Shared library for building Logos modules with minimal boilerplate";
 
   inputs = {
+    # LOCKED TO THE logos-fleet FORK, not to this URL. The mobile Bare outputs
+    # (`packages.aarch64-ios.bare` and friends) call logos-nix.lib.mkIosPkgs /
+    # mkAndroidPkgs / androidBuildSystems, none of which are upstream yet, and
+    # `nix flake update` would silently walk this back to logos-co and take
+    # common.mobileSystems down to []. Re-pin with
+    #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     # Optional newer rustc for crates whose deps out-pace the nixpkgs rustc
     # (opt-in per module via metadata `nix.rust.toolchain`).
@@ -332,6 +338,19 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
         };
+      }
+      # The mobile Bare artifacts: an iOS embedded framework (device and
+      # simulator) and an Android .so. aarch64-darwin ONLY -- iOS cannot be
+      # cross-compiled from anywhere else, and putting this key on the Linux
+      # systems would give `nix flake check` a derivation it can never realise.
+      // nixpkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+        bare-mobile = import ./tests/test-bare-modules-mobile.nix {
+          inherit pkgs;
+          mkLogosModule = lib.mkLogosModule;
+          fixturesRoot = ./tests/fixtures;
+        };
+      }
+      // {
         # The Bare-module gate: deliberately-wrong artifacts (Qt-linked, an
         # ABI export missing, the logos-protocol archive carried) must be
         # rejected by name. No module build — just the gate and nm/otool.

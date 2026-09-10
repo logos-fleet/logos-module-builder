@@ -386,6 +386,13 @@ function(logos_bare_module)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bare"
     )
 
+    # The SDK and protocol headers this compiles against are C++17
+    # (std::optional, std::is_floating_point_v). Native clang and gcc default
+    # to gnu++17 and made that invisible; Xcode's clang targeting iOS does not,
+    # and the first cross build failed inside logos_codec.h. State the
+    # requirement rather than inherit a default.
+    target_compile_features(${_BARE_TARGET} PRIVATE cxx_std_17)
+
     target_include_directories(${_BARE_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src

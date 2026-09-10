@@ -96,6 +96,20 @@ let
     # PSEUDO-system: a cross derivation's `system` is its BUILD platform, so
     # this row describes x86_64-w64-mingw32, not a native Windows builder.
     "x86_64-windows" = { os = "windows"; architecture = "x86_64";  abi = "gnu"; };
+    # The mobile pseudo-systems (common.mobileSystems), same convention.
+    #
+    # THE DEVICE AND THE SIMULATOR SHARE A TRIPLE. Both elaborate to
+    # arm64-apple-ios; what separates them is `darwinPlatform`
+    # (ios / ios-simulator), which is not one of the three selector components
+    # and deliberately is not being made one — a metadata overlay that has to
+    # differ between an iPhone and the simulator running the same architecture
+    # is describing a build detail, not a platform. Two systems mapping to one
+    # triple is fine: the table is keyed by system.
+    "aarch64-ios"           = { os = "ios";   architecture = "aarch64"; abi = "unknown"; };
+    "aarch64-ios-simulator" = { os = "ios";   architecture = "aarch64"; abi = "unknown"; };
+    # `abi = "android"` is what makes this row distinguishable from
+    # aarch64-linux, which is otherwise the same two values.
+    "aarch64-android"       = { os = "linux"; architecture = "aarch64"; abi = "android"; };
   };
 
   triples = builtins.attrValues platformTriples;

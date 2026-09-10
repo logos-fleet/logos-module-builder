@@ -1165,6 +1165,82 @@ let
     }
   );
 
+  # ── the Bare module on mobile ─────────────────────────────────────────────
+  # `nix build .#packages.aarch64-ios.bare` (and the sim / Android keys): the
+  # SAME Bare artifact as the native one, cross-compiled — an iOS embedded
+  # framework and an Android shared object. buildBareModule reads the shape off
+  # the package set's host platform; nothing here says "framework".
+  #
+  # Only `bare`. The mobile keys deliberately carry no other output: there is no
+  # Qt plugin host on a phone, which is the reason the Bare module exists at
+  # all. See common.nix (`mobileSystems`) for why they are not in
+  # `common.systems`.
+  #
+  # THE GENERATED TREE COMES FROM THE BUILD PLATFORM. `generate` is source —
+  # the module's own files plus everything its code generators emitted — and a
+  # code generator is a host tool. Re-running the generators under a cross
+  # package set would need a Qt, a logos-qt-generator and a logos-cpp-generator
+  # for a phone, none of which exist or should. So the mobile bare artifact is
+  # a cross COMPILE of the native `generate`, which also makes it byte-identical
+  # in input to the native bare artifact.
+  mobileBareFor = { androidBuildSystem }:
+    common.forAllMobileSystems { inherit androidBuildSystem; }
+      ({ system, pkgs, buildSystem }:
+        let
+          mobileConfig = configFor system;
+          getMobilePkg = name: lib.getAttrFromPath (lib.splitString "." name) pkgs;
+          mobileBuildPkgs =
+            map getMobilePkg (lib.filter builtins.isString mobileConfig.nix_packages.build);
+          mobileRuntimePkgs =
+            map getMobilePkg (lib.filter builtins.isString mobileConfig.nix_packages.runtime);
+          # A Rust or Go core is staged into the generate tree as an archive
+          # compiled for the BUILD platform, so cross-linking it is not a
+          # matter of passing a flag — the archive is the wrong machine code.
+          # Refuse by name rather than fail in the linker.
+          refuseNonCpp = lang:
+            throw ("logos-module-builder: module '" + mobileConfig.name + "' has a " + lang
+                   + " core, and its compiled archive is staged into the `generate` tree "
+                   + "for the BUILD platform. Cross-compiling it for " + system
+                   + " needs a " + lang + " cross toolchain wired into the builder, "
+                   + "which this slice does not do. The C++ Bare shape crosses today.");
+        in lib.optionalAttrs mobileConfig.packaged_as_cdylib {
+          # Same gate as the native `bare`: a ui_qml view backend or a `legacy`
+          # module is a Qt plugin object holding a LogosAPI and has no
+          # protocol-free form to extract.
+          bare =
+            if (mobileConfig.codegen or { }) ? rust then refuseNonCpp "Rust"
+            else if mobileConfig.go_static_lib_names != [ ] then refuseNonCpp "Go"
+            else buildBareModule {
+              inherit pkgs builderRoot;
+              config = mobileConfig;
+              generatedSrc = packages.${buildSystem}.generate;
+              # Headers and an INTERFACE-only CMake config in both cases: the
+              # Bare build compiles against them and links neither. Taking the
+              # BUILD platform's is not a shortcut, it is the only honest
+              # answer — there is nothing in either prefix to cross-compile.
+              logosSdk = logos-cpp-sdk.packages.${buildSystem}.default;
+              logosProtocol = logos-protocol.packages.${buildSystem}.default;
+              gateScript = builderRoot + "/scripts/logos-bare-gate.sh";
+              moduleImplAbi = moduleImplAbiFor buildSystem;
+              extraNativeBuildInputs = mobileBuildPkgs;
+              extraBuildInputs = mobileRuntimePkgs;
+            };
+        });
+
+  # The canonical view, keyed the way logos-nix keys its own mobile targets.
+  mobileBarePackages = mobileBareFor {
+    androidBuildSystem = common.defaultAndroidBuildSystem;
+  };
+
+  # ...and one per Android build platform, because a cross derivation's
+  # `system` is its BUILD platform: `packages.aarch64-android` above is
+  # x86_64-linux and cannot be REALISED on a Mac even though the Mac builds the
+  # identical closure. Same shape (and same reason) as logos-basecamp's
+  # `legacyPackages.<buildSystem>.mobile`.
+  mobileBareLegacyPackages = lib.genAttrs
+    (if common.mobileSystems == [ ] then [ ] else common.androidBuildSystems)
+    (androidBuildSystem: { mobile = mobileBareFor { inherit androidBuildSystem; }; });
+
   # LGX package outputs (nix-bundle-lgx provided by the builder)
   nixBundleLgx = nix-bundle-lgx;
 
@@ -1268,7 +1344,10 @@ let
   ) mergedPackages;
 
 in {
-  packages = finalPackages;
+  # The mobile keys are MERGED rather than folded into forAllSystems: they
+  # carry `bare` and nothing else. See mobileBareFor above.
+  packages = finalPackages // mobileBarePackages;
+  legacyPackages = mobileBareLegacyPackages;
   inherit devShells config;
   # The RESOLVED config, per target. `config` above cannot answer for a
   # platform-keyed field and says so when asked; a consumer that needs
