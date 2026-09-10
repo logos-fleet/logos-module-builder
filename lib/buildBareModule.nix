@@ -62,8 +62,8 @@
   # replaces the build-platform one `generate` snapshotted: `generate` is a
   # source tree, so it is correct for every target except in lib/.
   stagedArchives ? [],
-  # Extra gating, appended to installCheckPhase -- the Android DT_NEEDED gate.
-  extraInstallCheck ? "",
+  # Extra gating, run after the Bare gate below -- the Android DT_NEEDED gate.
+  extraGateChecks ? "",
   # Where CMakeLists.txt is, relative to the build directory. Only a cross
   # caller sets it: xcodeClang.mkDerivation drives cmake through its own
   # preConfigure and is told the source directory this way.
@@ -79,75 +79,76 @@ let
   libExt = if isMachO then "dylib" else "so";
   artifact = "${config.name}_bare.${libExt}";
 
-in mkDerivation ({
-  pname = "logos-${config.name}-bare";
-  version = config.version;
+  drvAttrs = {
+    pname = "logos-${config.name}-bare";
+    version = config.version;
 
-  src = generatedSrc;
+    src = generatedSrc;
 
-  nativeBuildInputs = toolchainNativeBuildInputs ++ extraNativeBuildInputs;
-  buildInputs = [ pkgs.nlohmann_json ] ++ extraBuildInputs;
+    nativeBuildInputs = toolchainNativeBuildInputs ++ extraNativeBuildInputs;
+    buildInputs = [ pkgs.nlohmann_json ] ++ extraBuildInputs;
 
-  inherit strictDeps;
+    inherit strictDeps;
 
-  postPatch = lib.optionalString (stagedArchives != []) ''
-    mkdir -p lib
-    ${lib.concatMapStringsSep "\n" (a: ''cp -f "${a}" lib/'') stagedArchives}
-  '';
+    postPatch = lib.optionalString (stagedArchives != []) ''
+      mkdir -p lib
+      ${lib.concatMapStringsSep "\n" (a: ''cp -f "${a}" lib/'') stagedArchives}
+    '';
 
-  cmakeFlags = [
-    "-GNinja"
-    "-DLOGOS_MODULE_BARE=ON"
-    "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
-    "-DLOGOS_PROTOCOL_ROOT=${logosProtocol}"
-  ]
-  ++ targetCmakeFlags
-  ++ lib.optionals (rustStaticNames != []) [
-    "-DLOGOS_MODULE_RUST_STATIC_LIBS=${lib.concatStringsSep ";" rustStaticNames}"
-  ]
-  ++ lib.optionals (goStaticNames != []) [
-    "-DLOGOS_MODULE_GO_STATIC_LIBS=${lib.concatStringsSep ";" goStaticNames}"
-  ];
+    cmakeFlags = [
+      "-GNinja"
+      "-DLOGOS_MODULE_BARE=ON"
+      "-DLOGOS_CPP_SDK_ROOT=${logosSdk}"
+      "-DLOGOS_PROTOCOL_ROOT=${logosProtocol}"
+    ]
+    ++ targetCmakeFlags
+    ++ lib.optionals (rustStaticNames != []) [
+      "-DLOGOS_MODULE_RUST_STATIC_LIBS=${lib.concatStringsSep ";" rustStaticNames}"
+    ]
+    ++ lib.optionals (goStaticNames != []) [
+      "-DLOGOS_MODULE_GO_STATIC_LIBS=${lib.concatStringsSep ";" goStaticNames}"
+    ];
 
-  # The module-impl ABI exports are the artifact's entire reason to exist;
-  # never let fixup strip them.
-  dontStrip = true;
+    # The module-impl ABI exports are the artifact's entire reason to exist;
+    # never let fixup strip them.
+    dontStrip = true;
 
-  env = { LOGOS_MODULE_BUILDER_ROOT = "${builderRoot}"; } // gateEnv;
+    env = { LOGOS_MODULE_BUILDER_ROOT = "${builderRoot}"; } // gateEnv;
 
-  # logos_bare_module() writes the artifact to <build>/bare/.
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 bare/${artifact} $out/lib/${artifact}
-    ${lib.optionalString isMachO ''
-      install_name_tool -id "@rpath/${artifact}" "$out/lib/${artifact}"
-    ''}
-    runHook postInstall
-  '';
+    # logos_bare_module() writes the artifact to <build>/bare/.
+    installPhase = ''
+      runHook preInstall
+      install -Dm755 bare/${artifact} $out/lib/${artifact}
+      ${lib.optionalString isMachO ''
+        install_name_tool -id "@rpath/${artifact}" "$out/lib/${artifact}"
+      ''}
+      runHook postInstall
+    '';
 
-  # ── the gate ────────────────────────────────────────────────────────────
-  # "Protocol-free" is only true if the linker agrees: run the gate over the
-  # installed artifact and fail the derivation when it does not.
-  #
-  # postFixup, NOT installCheckPhase, and that is load-bearing: nixpkgs'
-  # mkDerivation computes `doInstallCheck && buildPlatform.canExecute
-  # hostPlatform`, so under ANY cross build it quietly resolves to false and
-  # the phase is skipped. This gate reads a symbol table -- it never runs the
-  # artifact -- so there is nothing for that rule to protect against here, and
-  # the shape it produces is the worst one available: three mobile Bare modules
-  # that report themselves gated and were not. (Measured: the aarch64-ios-
-  # simulator artifact built with `doInstallCheck = true` and no
-  # installCheckPhase in the log at all.)
-  postFixup = ''
-    echo "logos-module-builder: gating ${artifact}"
-    LOGOS_MODULE_IMPL_EXPORTS=${moduleImplAbi}/exports.txt \
-      bash ${gateScript} "$out/lib/${artifact}"
-    ${extraInstallCheck}
-  '';
+    # ── the gate ────────────────────────────────────────────────────────────
+    # "Protocol-free" is only true if the linker agrees: run the gate over the
+    # installed artifact and fail the derivation when it does not.
+    #
+    # postFixup, NOT installCheckPhase, and that is load-bearing: nixpkgs'
+    # mkDerivation computes `doInstallCheck && buildPlatform.canExecute
+    # hostPlatform`, so under ANY cross build it quietly resolves to false and
+    # the phase is skipped. This gate reads a symbol table -- it never runs the
+    # artifact -- so there is nothing for that rule to protect against here, and
+    # the shape it produces is the worst one available: three mobile Bare modules
+    # that report themselves gated and were not. (Measured: the aarch64-ios-
+    # simulator artifact built with `doInstallCheck = true` and no
+    # installCheckPhase in the log at all.)
+    postFixup = ''
+      echo "logos-module-builder: gating ${artifact}"
+      LOGOS_MODULE_IMPL_EXPORTS=${moduleImplAbi}/exports.txt \
+        bash ${gateScript} "$out/lib/${artifact}"
+      ${extraGateChecks}
+    '';
 
-  meta = with lib; {
-    description = "${config.description} (Bare module: protocol-free, no Qt)";
-    platforms = platforms.unix;
+    meta = with lib; {
+      description = "${config.description} (Bare module: protocol-free, no Qt)";
+      platforms = platforms.unix;
+    };
   };
-}
-// lib.optionalAttrs (cmakeDir != null) { inherit cmakeDir; })
+in
+mkDerivation (drvAttrs // lib.optionalAttrs (cmakeDir != null) { inherit cmakeDir; })

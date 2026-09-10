@@ -71,23 +71,21 @@ let
       # is or what would fix it. (Measured on package_manager_module, whose
       # external `lgx` is exactly this case.)
       externalLibNames = map (e: e.name or (toString e)) config.external_libraries;
-      assertNoExternalLibs =
-        if config.external_libraries == [ ] then null
-        else throw ''
-          logos-module-builder: module '${config.name}' cannot be built as a Bare
-          module for ${system} yet: it declares nix.external_libraries
-          (${lib.concatStringsSep ", " externalLibNames}).
+      externalLibRefusal = ''
+        logos-module-builder: module '${config.name}' cannot be built as a Bare
+        module for ${system} yet: it declares nix.external_libraries
+        (${lib.concatStringsSep ", " externalLibNames}).
 
-          Those are staged into lib/ as build-platform images by the module's own
-          `generate` step, and nothing here can recompile them -- each one comes
-          from its own flake. For a mobile Bare module the external library has to
-          be built for the target and staged in its place, which means the flake
-          providing it publishing a package for ${system}.
+        Those are staged into lib/ as build-platform images by the module's own
+        `generate` step, and nothing here can recompile them -- each one comes
+        from its own flake. For a mobile Bare module the external library has to
+        be built for the target and staged in its place, which means the flake
+        providing it publishing a package for ${system}.
 
-          Until then this module has a native `bare` output and no mobile one.
-          A codegen.rust core is different and DOES cross: the crate is rebuilt
-          for the target here.
-        '';
+        Until then this module has a native `bare` output and no mobile one.
+        A codegen.rust core is different and DOES cross: the crate is rebuilt
+        for the target here.
+      '';
 
       # ── the Rust core, for the target ─────────────────────────────────
       # `generate` staged a build-platform archive into lib/; a Bare module
@@ -150,7 +148,7 @@ let
         # The crate laid out for the build (scaffold injected, SDK source
         # alongside), published by the build platform's package set so the
         # generator runs exactly once for all three targets.
-        src = buildPackages."rust-crate-src";
+        src = buildPackages.rust-crate-src;
         sourceRoot = "logos-${config.name}-rust-src/rust-lib";
         cargoLock = {
           lockFile = "${rustCrateDir}/Cargo.lock";
@@ -225,7 +223,7 @@ let
           # APK packages it and every image in the process shares that one copy.
           # Named here rather than waved through inside the gate, so the
           # allowance is visible where the decision belongs.
-          extraInstallCheck = ''
+          extraGateChecks = ''
             ${pkgs.logosAndroidDtNeededGate}/bin/logos-android-dt-needed-gate \
               --allow libc++_shared.so \
               "$out/lib/${config.name}_bare.so"
@@ -242,7 +240,7 @@ let
           # install_name_tool), cmake and ninja.
           toolchainNativeBuildInputs = [ ];
           gateEnv = { };
-          extraInstallCheck = "";
+          extraGateChecks = "";
         };
 
       bare = buildBareModule ({
@@ -265,7 +263,8 @@ let
         strictDeps = true;
       } // platform);
     in
-    builtins.seq assertNoExternalLibs {
+    if config.external_libraries != [ ] then throw externalLibRefusal
+    else {
       inherit bare;
       "${config.name}-bare" = bare;
       default = bare;

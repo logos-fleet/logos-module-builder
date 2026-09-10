@@ -48,7 +48,7 @@ let
   buildSystem = pkgs.stdenv.hostPlatform.system;
   mobileOf = entry: entry.m.mobileBarePackagesFor { androidBuildSystem = buildSystem; };
 
-  # Only aarch64-darwin can build the iOS sets at all (Xcode, ADR 0002).
+  # Only macOS can build the iOS sets at all (Xcode, ADR 0002).
   iosTargets = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
     # target, the Mach-O LC_BUILD_VERSION platform number Apple assigns it
     { system = "aarch64-ios"; platform = "2"; }
@@ -133,13 +133,15 @@ let
     noMobileBare "a hand-written Qt core module" "test-framework-module"
     && noMobileBare "a ui_qml view backend" "qml-module";
 
-  # A module with `nix.external_libraries` has to be REFUSED, by name, at
-  # eval. Those libraries are staged into lib/ as build-platform images and
-  # nothing here can recompile them; left to the linker it surfaces forty lines
-  # into a link command as "building for 'iOS-simulator', but linking in dylib
-  # ... built for 'macOS'", which names neither the library's owner nor the
-  # fix. Asserted BY MESSAGE: a test that only checked for failure would pass
-  # on a typo in this file.
+  # A module with `nix.external_libraries` has to be REFUSED at eval. Those
+  # libraries are staged into lib/ as build-platform images and nothing here can
+  # recompile them; left to the linker it surfaces forty lines into a link
+  # command as "building for 'iOS-simulator', but linking in dylib ... built for
+  # 'macOS'", which names neither the library's owner nor the fix.
+  #
+  # Only the FAILURE is asserted, not its wording: `builtins.tryEval` yields
+  # `{ success, value }` and never the message, so there is no pure way to match
+  # on it. The refusal's text is exercised by reading it, not by this check.
   extlibModule = mkLogosModule {
     src = fixturesRoot + "/extlib-module";
     configFile = fixturesRoot + "/extlib-module/metadata.json";

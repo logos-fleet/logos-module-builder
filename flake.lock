@@ -5631,11 +5631,11 @@
         "nixpkgs-windows": "nixpkgs-windows_3"
       },
       "locked": {
-        "lastModified": 1789047106,
-        "narHash": "sha256-o1Bjwkr4eDFWE2YS1+0Re38kNpXendCpu+y1Lr2w3Vs=",
+        "lastModified": 1789069001,
+        "narHash": "sha256-EI9mc/ou5CD7S3iUvYnNPuqATP++RT7toZA6uvYL/Eo=",
         "owner": "logos-fleet",
         "repo": "logos-nix",
-        "rev": "34d1cfb531a379913550c7c35b781a84165dbd11",
+        "rev": "99442710a97619466ee718c582649402df1a3e7d",
         "type": "github"
       },
       "original": {

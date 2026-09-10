@@ -1036,7 +1036,7 @@ let
       # alongside it. Published because the MOBILE Bare module has to compile
       # the same crate for its own target (./mobileBare.nix), and generating
       # the scaffold once is what keeps all four targets on one rev of it.
-      "rust-crate-src" = rustCrateSrc;
+      rust-crate-src = rustCrateSrc;
     } // lib.optionalAttrs config.packaged_as_cdylib {
       # The Bare module artifact — gated at build time by
       # scripts/logos-bare-gate.sh (protocol-free or no derivation).
@@ -1246,6 +1246,8 @@ let
     packagesFor = system: finalPackages.${system};
     inherit getPkg;
   };
+  # `packaged_as_cdylib` is a property of the module's shape, not of a target,
+  # so any system answers it; take the first.
   hasMobileBare = common.hasMobile && (configFor (lib.head common.systems)).packaged_as_cdylib;
   mobileBarePackagesFor = args:
     if !hasMobileBare then { } else mobileBare (mobileBareArgs // args);
