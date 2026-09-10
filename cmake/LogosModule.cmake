@@ -460,9 +460,17 @@ function(logos_bare_module)
     set(_BARE_WHOLE_ARCHIVES "")
     foreach(_lang IN ITEMS GO RUST)
         foreach(_archive_name IN LISTS LOGOS_MODULE_${_lang}_STATIC_LIBS)
+            # NO_CMAKE_FIND_ROOT_PATH: this archive lives in the SOURCE TREE,
+            # not in a sysroot. Under a cross build CMake re-roots find_library
+            # at CMAKE_FIND_ROOT_PATH -- an iOS toolchain sets that to the SDK
+            # -- so the absolute path named in PATHS is silently rewritten to
+            # <sdk>/nix/var/nix/builds/.../lib and nothing is found. NO_DEFAULT_PATH
+            # does not turn re-rooting off; only this does. (Measured on the
+            # aarch64-ios leg of a codegen.rust module: "RUST static library
+            # 'x' was not found in <the exact directory holding it>".)
             find_library(_LOGOS_BARE_${_lang}_${_archive_name}
                 NAMES lib${_archive_name}.a lib${_archive_name}.lib ${_archive_name}.a ${_archive_name}.lib ${_archive_name}
-                PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH)
+                PATHS ${_BARE_STATIC_LIB_DIR} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
             if(NOT _LOGOS_BARE_${_lang}_${_archive_name})
                 message(FATAL_ERROR
                     "${_lang} static library '${_archive_name}' was not found in "
@@ -487,7 +495,15 @@ function(logos_bare_module)
             target_link_libraries(${_BARE_TARGET} PRIVATE
                 "-framework CoreFoundation" "-framework Security")
         else()
-            target_link_libraries(${_BARE_TARGET} PRIVATE pthread dl)
+            # NOT `pthread dl`: bionic has both inside libc and ships neither
+            # as a library, so a literal -lpthread fails the Android link with
+            # "unable to find library -lpthread". Threads::Threads and
+            # CMAKE_DL_LIBS are the portable spellings -- they expand to
+            # -lpthread / -ldl exactly where those files exist, and to nothing
+            # where the platform folds them into libc. Reachable on Android
+            # since a codegen.rust module crosses (lib/mobileBare.nix).
+            find_package(Threads REQUIRED)
+            target_link_libraries(${_BARE_TARGET} PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         endif()
     endif()
 
@@ -512,8 +528,15 @@ function(logos_bare_module)
             -Wl,--no-as-needed ${LOGOS_MODULE_BARE_LINK_HOST_ABI} -Wl,--as-needed)
     endif()
 
-    # lp_* stays undefined: that IS the Bare shape. ELF allows undefined symbols
-    # in a shared object by default; Mach-O has to be told.
+    # lp_* stays undefined: that IS the Bare shape. Both linkers have to be
+    # told so -- ELF permits undefined symbols in a shared object by default,
+    # but a cross toolchain may have turned that default off. The NDK's
+    # android.toolchain.cmake does exactly that (`-Wl,--no-undefined` in
+    # CMAKE_SHARED_LINKER_FLAGS), and the link then fails on lp_token_save,
+    # lp_token_save_inbound and lp_grant_host_services -- the three the host
+    # image exists to supply. `-z undefs` is the ELF twin of Mach-O's
+    # `-undefined dynamic_lookup`: it cancels `-z defs` / `--no-undefined`
+    # whether or not anything set it, so this is stated rather than assumed.
     if(APPLE)
         target_link_options(${_BARE_TARGET} PRIVATE -undefined dynamic_lookup)
         set_target_properties(${_BARE_TARGET} PROPERTIES
@@ -522,6 +545,7 @@ function(logos_bare_module)
             BUILD_WITH_INSTALL_NAME_DIR TRUE
         )
     else()
+        target_link_options(${_BARE_TARGET} PRIVATE "LINKER:-z,undefs")
         set_target_properties(${_BARE_TARGET} PROPERTIES
             INSTALL_RPATH "$ORIGIN"
             INSTALL_RPATH_USE_LINK_PATH FALSE

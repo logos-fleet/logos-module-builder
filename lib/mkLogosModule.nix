@@ -1030,6 +1030,14 @@ let
       # re-runs (LogosModule.cmake consumes the pre-populated generated_code/).
       generate = moduleGenerate;
       "${config.name}-generate" = moduleGenerate;
+    } // lib.optionalAttrs isRustModule {
+      # The crate laid out for a build: the crate under rust-lib/ with the
+      # generated scaffold injected, and the builder's logos-rust-sdk source
+      # alongside it. Published because the MOBILE Bare module compiles the
+      # SAME crate for its own target (mobileBareFor below) -- generating the
+      # scaffold once on the build platform is what keeps all four targets on
+      # one rev of it.
+      rust-crate-src = rustCrateSrc;
     } // lib.optionalAttrs config.packaged_as_cdylib {
       # The Bare module artifact — gated at build time by
       # scripts/logos-bare-gate.sh (protocol-free or no derivation).
@@ -1193,23 +1201,181 @@ let
             map getMobilePkg (lib.filter builtins.isString mobileConfig.nix_packages.build);
           mobileRuntimePkgs =
             map getMobilePkg (lib.filter builtins.isString mobileConfig.nix_packages.runtime);
-          # A Rust or Go core is staged into the generate tree as an archive
-          # compiled for the BUILD platform, so cross-linking it is not a
-          # matter of passing a flag — the archive is the wrong machine code.
-          # Refuse by name rather than fail in the linker.
-          refuseNonCpp = lang:
-            throw ("logos-module-builder: module '" + mobileConfig.name + "' has a " + lang
-                   + " core, and its compiled archive is staged into the `generate` tree "
-                   + "for the BUILD platform. Cross-compiling it for " + system
-                   + " needs a " + lang + " cross toolchain wired into the builder, "
-                   + "which this slice does not do. The C++ Bare shape crosses today.");
+          buildPkgs = common.mkPkgs buildSystem;
+          isAndroid = system == "aarch64-android";
+
+          # ── what still does not cross ───────────────────────────────────
+          # A Go core is staged into the generate tree as an archive compiled
+          # for the BUILD platform. Unlike the Rust core below, nothing here
+          # rebuilds it. Refuse by name rather than fail in the linker.
+          refuseGoCore = throw ("logos-module-builder: module '" + mobileConfig.name
+            + "' has a Go core, and its compiled archive is staged into the "
+            + "`generate` tree for the BUILD platform. Cross-compiling it for "
+            + system + " needs a Go cross toolchain wired into the builder, "
+            + "which this slice does not do. The C++ and Rust Bare shapes "
+            + "cross today.");
+
+          # `nix.external_libraries` are staged into lib/ by the generate step
+          # as BUILD-PLATFORM images, and unlike a Rust core there is nothing
+          # here that could rebuild them: each comes from its OWN flake, which
+          # would have to publish a package for this target. Refused by name,
+          # at eval, rather than left to the linker — which reports it as
+          #     ld: building for 'iOS-simulator', but linking in dylib
+          #         (.../libfoo.dylib) built for 'macOS'
+          # forty lines into a link command, naming neither whose library it is
+          # nor what would fix it. (Measured on package_manager_module, whose
+          # external `lgx` is exactly this case.)
+          externalLibNames = mkExternalLib.getExternalLibNames mobileConfig;
+          refuseExternalLibs = throw ("logos-module-builder: module '"
+            + mobileConfig.name + "' cannot be built as a Bare module for " + system
+            + " yet: it declares nix.external_libraries ("
+            + lib.concatStringsSep ", " externalLibNames + "). Those are staged "
+            + "into lib/ as build-platform images by the module's own `generate` "
+            + "step, and nothing here can recompile them — each one comes from its "
+            + "own flake, which has to publish a package for " + system + " and "
+            + "have it staged in place. Until then this module has a native "
+            + "`bare` output and no mobile one. A codegen.rust core is different "
+            + "and DOES cross: the crate is rebuilt for the target here.");
+
+          # ── the Rust core, for the target ────────────────────────────────
+          # `generate` staged a BUILD-platform archive into lib/; a Bare module
+          # links it whole, so on mobile it has to be the target's machine code.
+          # Everything else about the crate — the injected scaffold, the SDK
+          # source beside it — is reused from the build platform's
+          # `rust-crate-src`, so the generator runs once for all four targets.
+          mobileIsRust = (mobileConfig.codegen or { }) ? rust;
+          mobileRustCfg = (mobileConfig.codegen or { }).rust or { };
+          mobileRustCrateDir = "${src}/${mobileRustCfg.crate}";
+          mobileRustCargoToml =
+            builtins.fromTOML (builtins.readFile "${mobileRustCrateDir}/Cargo.toml");
+          mobileRustStaticName =
+            mobileRustCfg.staticlib
+              or (mobileRustCargoToml.lib.name
+                  or (lib.replaceStrings [ "-" ] [ "_" ] mobileRustCargoToml.package.name));
+
+          mobileRustTriple = common.mobileRustTargets.${system}
+            or (throw "logos-module-builder: no cargo target known for ${system}");
+
+          # The toolchain must RUN on the builder and merely TARGET `system`.
+          # From rust-overlay rather than nixpkgs' rustc because only
+          # rust-overlay can add a target's std to an existing toolchain;
+          # nixpkgs' cross rustPlatform would have to come from the TARGET
+          # package set, which for iOS has no working stdenv at all.
+          mobileRustPkgs =
+            if rust-overlay == null
+            then throw ("logos-module-builder: module '" + mobileConfig.name
+              + "' is a codegen.rust module and its mobile Bare artifact needs a "
+              + "cross Rust toolchain, but this builder was built without a "
+              + "rust-overlay input.")
+            else common.mkPkgsWith [ (import rust-overlay) ] buildSystem;
+          mobileRustToolchain =
+            (if mobileConfig.nix_rust.toolchain != null
+             then mobileRustPkgs.rust-bin.stable.${mobileConfig.nix_rust.toolchain}.default
+             else mobileRustPkgs.rust-bin.stable.latest.default
+            ).override { targets = [ mobileRustTriple ]; };
+          mobileRustPlatform = mobileRustPkgs.makeRustPlatform {
+            cargo = mobileRustToolchain;
+            rustc = mobileRustToolchain;
+          };
+
+          # The crate's own system libraries, for the TARGET. A build script
+          # that probes one does so with the build platform's pkg-config, which
+          # knows nothing about cross: it refuses outright ("pkg-config has not
+          # been configured to support cross-compilation") rather than answering
+          # wrongly. Pointing it at the target .pc files and allowing cross is
+          # what turns that refusal into the right answer. BOTH pkgconfig
+          # directories: nixpkgs puts a .pc under share/ whenever it is
+          # architecture-independent (zlib's is), and naming only lib/ finds
+          # nothing for those.
+          mobileRustTargetLibs = map getMobilePkg
+            (lib.filter builtins.isString mobileConfig.nix_rust.packages.runtime);
+          mobileRustPkgConfigSetup = lib.optionalString (mobileRustTargetLibs != [ ]) ''
+            export PKG_CONFIG_ALLOW_CROSS=1
+            export PKG_CONFIG_PATH=${
+              lib.concatMapStringsSep ":"
+                (q: "${lib.getDev q}/lib/pkgconfig:${lib.getDev q}/share/pkgconfig")
+                mobileRustTargetLibs
+            }
+          '';
+
+          mobileRustArchive = mobileRustPlatform.buildRustPackage {
+            pname = "${mobileRustStaticName}-${system}";
+            version = mobileConfig.version;
+            src = packages.${buildSystem}.rust-crate-src;
+            sourceRoot = "logos-${mobileConfig.name}-rust-src/rust-lib";
+            cargoLock = {
+              lockFile = "${mobileRustCrateDir}/Cargo.lock";
+              allowBuiltinFetchGit = true;
+            };
+            # No xcodeWrapper here: it would put Xcode's clang/ar/ranlib/nm in
+            # front of nixpkgs' on PATH for the BUILD-platform half of the same
+            # cargo run (build scripts, proc macros). logosRustCrossSetup
+            # reaches Xcode by absolute path instead.
+            nativeBuildInputs = map (getPkg buildPkgs)
+              (lib.filter builtins.isString mobileConfig.nix_rust.packages.build);
+            buildInputs = mobileRustTargetLibs;
+            env = mobileConfig.nix_rust.env;
+            doCheck = false;
+            # fixupPhase would otherwise run the BUILD platform's strip over the
+            # installed archive, and this derivation runs in the build
+            # platform's stdenv (so the toolchain is runnable) while producing a
+            # TARGET archive. Measured on aarch64-darwin: Darwin's strip rewrote
+            # the aarch64-android archive's index into BSD's `__.SYMDEF SORTED`,
+            # and ld.lld then rejected it with "not an ELF file" naming the `/`
+            # member — a message about the archive INDEX that reads like a
+            # message about the objects. Nothing here should be stripped anyway;
+            # the module-impl exports are the point.
+            dontStrip = true;
+            # iOS reaches Xcode through /Applications (logos-nix ADR 0002).
+            __noChroot = !isAndroid;
+            # cargoBuildHook derives `--target` from the stdenv's HOST platform,
+            # and this derivation deliberately runs in the BUILD platform's
+            # stdenv so the toolchain is runnable. Left alone it builds for the
+            # BUILDER — silently, producing a perfectly good archive that then
+            # fails to link.
+            buildPhase = ''
+              runHook preBuild
+              ${pkgs.logosRustCrossSetup}
+              ${mobileRustPkgConfigSetup}
+              export CARGO_HOME=$TMPDIR/cargo
+              cargo build --release --offline --target ${mobileRustTriple}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/lib
+              cp target/${mobileRustTriple}/release/lib${mobileRustStaticName}.a $out/lib/
+              runHook postInstall
+            '';
+          };
+
+          # ── the second gate, on Android ────────────────────────────────
+          # A Bare module may only name sonames the app ships or Android
+          # guarantees. This is where an `openssl_runtime`-shaped gap is caught
+          # — at the artifact, not at the phone. Two names are waved through by
+          # the container rather than by the module:
+          #   libc++_shared.so   Qt's Android platform refuses any STL but
+          #                      c++_shared (QtPlatformAndroid.cmake), so the
+          #                      Native container's APK packages it and every
+          #                      image in the process shares that one copy.
+          #   liblogos_protocol.so  the EMPTY host-ABI stub's soname, recorded
+          #                      as a DT_NEEDED so bionic can resolve lp_*; the
+          #                      host image supplies it. See buildBareModule.
+          # Named here, where the container's promise lives, rather than waved
+          # through inside the gate.
+          androidDtNeededGate = lib.optionalString isAndroid ''
+            ${pkgs.logosAndroidDtNeededGate}/bin/logos-android-dt-needed-gate \
+              --allow libc++_shared.so \
+              --allow liblogos_protocol.so \
+              "$gateTarget"
+          '';
         in lib.optionalAttrs mobileConfig.packaged_as_cdylib {
           # Same gate as the native `bare`: a ui_qml view backend or a `legacy`
           # module is a Qt plugin object holding a LogosAPI and has no
           # protocol-free form to extract.
           bare =
-            if (mobileConfig.codegen or { }) ? rust then refuseNonCpp "Rust"
-            else if mobileConfig.go_static_lib_names != [ ] then refuseNonCpp "Go"
+            if mkExternalLib.hasExternalLibs mobileConfig then refuseExternalLibs
+            else if mobileConfig.go_static_lib_names != [ ] then refuseGoCore
             else buildBareModule {
               inherit pkgs builderRoot;
               config = mobileConfig;
@@ -1224,6 +1390,12 @@ let
               moduleImplAbi = moduleImplAbiFor buildSystem;
               extraNativeBuildInputs = mobileBuildPkgs;
               extraBuildInputs = mobileRuntimePkgs;
+              # The target's archive REPLACES the build-platform one `generate`
+              # staged into lib/; the name it is linked under is unchanged.
+              rustStaticNames = lib.optional mobileIsRust mobileRustStaticName;
+              stagedArchives = lib.optional mobileIsRust
+                "${mobileRustArchive}/lib/lib${mobileRustStaticName}.a";
+              extraGateChecks = androidDtNeededGate;
             };
         });
 

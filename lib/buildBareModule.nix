@@ -44,8 +44,19 @@
   # LogosModule.cmake links them whole into the artifact.
   rustStaticNames ? [],
   goStaticNames ? [],
+  # Archives to drop into lib/ before cmake, REPLACING whatever the generate
+  # step staged there. `generate` is a source tree and is therefore right for
+  # every target -- except in lib/, where it snapshotted a BUILD-platform
+  # Rust/Go archive. A mobile caller passes the target's archive here; a native
+  # one passes nothing and keeps what generate staged.
+  stagedArchives ? [],
   extraNativeBuildInputs ? [],
   extraBuildInputs ? [],
+  # Gating that runs after the Bare gate, over the same artifact. Android
+  # passes logos-nix's DT_NEEDED gate here: "no unbundled system libs" is a
+  # different rule from "no Qt and no protocol code", judged on the same bytes
+  # at the same moment.
+  extraGateChecks ? "",
 }:
 
 let
@@ -233,6 +244,14 @@ in mkDerivation ({
     ++ extraNativeBuildInputs;
   buildInputs = [ pkgs.nlohmann_json ] ++ extraBuildInputs;
 
+  # Before cmake, and by overwrite rather than by flag: LogosModule.cmake
+  # resolves each rustStaticNames entry to lib/lib<name>.a inside the source
+  # tree, so the cross archive has to arrive under the name generate used.
+  postPatch = lib.optionalString (stagedArchives != []) ''
+    mkdir -p lib
+    ${lib.concatMapStringsSep "\n" (a: ''cp -f "${a}" lib/'') stagedArchives}
+  '';
+
   cmakeFlags = [
     "-GNinja"
     "-DLOGOS_MODULE_BARE=ON"
@@ -275,8 +294,12 @@ in mkDerivation ({
   postFixup = ''
     echo "logos-module-builder: gating ${installedName}"
     ${gateEnv}
+    # Named once, so extraGateChecks below does not have to restate the
+    # per-platform artifact naming rule (framework bundle / lib<stem>.so).
+    gateTarget="${gateTarget}"
     LOGOS_MODULE_IMPL_EXPORTS=${moduleImplAbi}/exports.txt \
-      bash ${gateScript} "${gateTarget}"
+      bash ${gateScript} "$gateTarget"
+    ${extraGateChecks}
   '';
 
   meta = with lib; {

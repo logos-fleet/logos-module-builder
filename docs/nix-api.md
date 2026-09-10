@@ -218,8 +218,8 @@ Returns an attribute set with:
       install-portable = <portable install package>;  # always included
 
       # Only for `interface: "cdylib"` and core `interface: "universal"` modules:
-      bare = <Bare module artifact>;
-      <name>-bare = <Bare module artifact>;
+      bare = <Bare module artifact>;          # also under packages.aarch64-ios,
+      <name>-bare = <Bare module artifact>;   # .aarch64-ios-simulator, .aarch64-android
 
       # Only when externalLibInputs uses structured format with variants:
       <name>-lib-portable = <portable library package>;
@@ -256,7 +256,8 @@ Returns an attribute set with:
   linked in.
 
 It is the build shape shared by the iOS embedded framework and the Wasm host.
-Desktop targets: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`.
+Desktop targets: `<name>_bare.dylib` / `<name>_bare.so` under `lib/`; the
+mobile targets are below.
 
 Who gets one: exactly the modules `parseMetadata` marks
 `packaged_as_cdylib` — `interface: "cdylib"` modules (C++ or `codegen.rust`)
@@ -271,8 +272,8 @@ every code generator has run — so `bare` and the plugin compile the same
 sources; `bare` just leaves the Qt ones out. Building `bare` never builds the
 plugin.
 
-**The gate.** Every `bare` derivation runs `scripts/logos-bare-gate.sh` as its
-install check and fails if the linker did not agree with the description above:
+**The gate.** Every `bare` derivation runs `scripts/logos-bare-gate.sh` in its
+`postFixup` and fails if the linker did not agree with the description above:
 a missing module-impl ABI export, any Qt symbol (mangled or moc-generated), a
 **defined** `lp_*` (meaning the logos-protocol archive was linked), a
 logos-protocol internal symbol, or a Qt / logos-protocol library in the load
@@ -289,6 +290,14 @@ LOGOS_MODULE_IMPL_EXPORTS=$(nix build --no-link --print-out-paths \
 `LOGOS_MODULE_IMPL_EXPORTS` is required: the gate refuses to run without a
 non-empty export list rather than pass an artifact against an ABI it never
 checked.
+
+The gate runs in `postFixup`, not in `installCheckPhase`, and that is
+load-bearing rather than stylistic: nixpkgs computes `doInstallCheck &&
+buildPlatform.canExecute hostPlatform`, so under any cross build the phase is
+skipped without a word. This gate reads a symbol table and never runs the
+artifact, so there is nothing for that rule to protect against here — and the
+shape it would otherwise produce is the worst one available, a mobile Bare
+module that reports itself gated and was not.
 
 The gate picks its reader off the ARTIFACT's magic bytes, not off `uname`, so
 it reads an Android `.so` correctly while running on a Mac; hand it a
@@ -317,19 +326,49 @@ when the builder's `logos-nix` input has the mobile targets.
 `_bare` survives into the installed filename on every platform on purpose:
 liblogos identifies a Bare module by that stem suffix.
 
-Two things the mobile keys do NOT do, and say so rather than guessing:
-
-- a `codegen.rust` or Go module is refused by name. Its compiled core is staged
-  into the `generate` tree for the BUILD platform, so cross-linking it needs a
-  Rust/Go cross toolchain that is not wired in;
-- `packages.aarch64-android` is built from logos-nix's canonical Android build
-  platform (`x86_64-linux`), which a Mac cannot realise. For the other one use
-  `legacyPackages.<buildSystem>.mobile.aarch64-android.bare` —
-  e.g. `legacyPackages.aarch64-darwin.mobile.aarch64-android.bare`.
-
 The generated sources come from the BUILD platform's `generate` output: a code
 generator is a host tool, so the mobile artifact is a cross COMPILE of exactly
-the tree the native one compiles.
+the tree the native one compiles. Its one target-specific corner is `lib/`,
+where the generate step staged a build-platform archive.
+
+**A `codegen.rust` core crosses.** The crate is recompiled for the target and
+staged over the build-platform archive `generate` left in `lib/`, so a Rust
+module has the same three mobile artifacts a C++ one does. The toolchain is a
+rust-overlay one that RUNS on the builder with the target's std added — nixpkgs'
+cross `rustPlatform` would have to come from the target package set, which for
+iOS has no working stdenv at all. `logos-nix`'s `lib.mobileRustTargets` names
+the cargo triple, and the linker / `cc-rs` / SDK wiring arrives as
+`pkgs.logosRustCrossSetup`, contributed by both mobile overlays under the same
+name. `packages.<buildSystem>.rust-crate-src` is published for this: the
+scaffold is generated once on the build platform and all four targets compile
+that same crate.
+
+**What still does not cross**, refused by name at eval rather than left to the
+linker:
+
+- a module declaring `nix.external_libraries`. Those are staged into `lib/` as
+  build-platform images by the module's own `generate` step and nothing here
+  can recompile them — each comes from its own flake, which has to publish a
+  package for the target and have it staged in place. Left to the linker it
+  surfaces as `ld: building for 'iOS-simulator', but linking in dylib ... built
+  for 'macOS'` forty lines into a link command, naming neither the library's
+  owner nor the fix;
+- a Go core, for the same reason with no cross toolchain wired in.
+
+And one platform fact: `packages.aarch64-android` is built from logos-nix's
+canonical Android build platform (`x86_64-linux`), which a Mac cannot realise.
+For the other one use `legacyPackages.<buildSystem>.mobile.aarch64-android.bare`
+— e.g. `legacyPackages.aarch64-darwin.mobile.aarch64-android.bare`.
+
+**The Android gate.** On top of the Bare-module gate, every `aarch64-android`
+artifact is run through logos-nix's `logos-android-dt-needed-gate`: a
+`DT_NEEDED` soname that is neither shipped beside the artifact nor guaranteed
+by Android at the app's API level fails the build rather than the phone (where
+it surfaces as an `UnsatisfiedLinkError` naming one soname and none of the
+reason). Two names are allowed explicitly — `libc++_shared.so`, because Qt's
+Android platform refuses any other STL and the Native container's APK therefore
+packages it, and `liblogos_protocol.so`, the empty host-ABI stub's soname the
+host image supplies.
 
 ### Example
 

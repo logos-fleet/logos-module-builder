@@ -149,6 +149,13 @@ let
     if hasMobileSupport then [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ]
     else [ ];
 
+  # cargo's spelling of each of those, taken from the repo that owns the
+  # platform decision rather than restated here. Empty in the same breath
+  # `mobileSystems` is, so a consumer's `or (throw ...)` never fires on a
+  # logos-nix without the mobile helpers -- it simply has no targets to ask
+  # about.
+  mobileRustTargets = if hasMobileSupport then logos-nix.lib.mobileRustTargets else { };
+
   # The build platform each mobile target is produced FROM.
   #
   # iOS: only aarch64-darwin can build it at all (Xcode). Android: either
@@ -304,7 +311,7 @@ let
 
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
-  inherit mobileSystems mkMobilePkgs forAllMobileSystems;
+  inherit mobileSystems mkMobilePkgs forAllMobileSystems mobileRustTargets;
   inherit androidBuildSystems defaultAndroidBuildSystem;
   inherit classifyConcreteDeps;
 

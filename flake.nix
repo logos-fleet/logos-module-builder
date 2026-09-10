@@ -4,9 +4,10 @@
   inputs = {
     # LOCKED TO THE logos-fleet FORK, not to this URL. The mobile Bare outputs
     # (`packages.aarch64-ios.bare` and friends) call logos-nix.lib.mkIosPkgs /
-    # mkAndroidPkgs / androidBuildSystems, none of which are upstream yet, and
-    # `nix flake update` would silently walk this back to logos-co and take
-    # common.mobileSystems down to []. Re-pin with
+    # mkAndroidPkgs / androidBuildSystems / mobileRustTargets and, on Android,
+    # the target set's `logosRustCrossSetup` and `logosAndroidDtNeededGate` --
+    # none of which are upstream yet, and `nix flake update` would silently walk
+    # this back to logos-co and take common.mobileSystems down to []. Re-pin with
     #   nix flake lock --override-input logos-nix github:logos-fleet/logos-nix/<rev>
     logos-nix.url = "github:logos-co/logos-nix";
     # Optional newer rustc for crates whose deps out-pace the nixpkgs rustc
