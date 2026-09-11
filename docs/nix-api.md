@@ -370,6 +370,82 @@ Android platform refuses any other STL and the Native container's APK therefore
 packages it, and `liblogos_protocol.so`, the empty host-ABI stub's soname the
 host image supplies.
 
+### The `view` output — a `ui_qml` module as an iOS framework
+
+```bash
+nix build .#packages.aarch64-ios.view            # iPhone / iPad
+nix build .#packages.aarch64-ios-simulator.view  # the simulator
+```
+
+The same `type: ui_qml` module as the desktop Qt plugin — same sources, same
+`generate` tree — built as ONE embedded framework carrying its Qt backend, the
+typed source AND replica of its `.rep`, and its QML compiled into the image's
+own `qrc`. Nothing is linked into it: Qt, logos-qt-host (`LogosAPI`) and the
+`lp_*` C ABI are all left **undefined** and resolve upward into the app image
+at `dlopen`, which is what ADR 0006 asks for and what the
+`ios-dlopen-bare-module` spike measured (Level 2).
+
+Layout: `Library/Frameworks/<name>_view.framework/{<name>_view,Info.plist}`,
+install_name `@rpath/<name>_view.framework/<name>_view` — copy it into
+`<App>.app/Frameworks/` with Code Sign On Copy. The module's `metadata.json`
+travels beside it at `share/logos/<name>/metadata.json`, because that flat
+directory has no room for a manifest and the host has to carry one.
+
+**The C edge.** `<App>.app/Frameworks/` is flat and read-only, there is no
+plugin directory to scan, and a Store app does not take the `QPluginLoader`
+path. The host reaches the image with `dlopen` + `dlsym` and nothing else:
+
+| symbol | answers |
+|---|---|
+| `logos_view_module_abi_version()` | `1` today; the host refuses a number it does not know |
+| `logos_view_module_name()` / `_version()` | the module's identity |
+| `logos_view_module_qml_url()` | `qrc:/logos/<name>/<entry>` — inside this image |
+| `logos_view_module_create()` | the plugin object, which the host `qobject_cast`s to `LogosViewPlugin` |
+| `logos_view_module_acquire_replica(node)` | the typed replica, from the host's `QRemoteObjectNode` |
+| `qt_plugin_instance()` | Qt's own, emitted by moc from `Q_PLUGIN_METADATA` |
+
+The replica entry point is in the framework because on a phone there is no
+separate `<name>_replica_factory` plugin file to load; on the desktop that
+second plugin is still exactly what it was.
+
+**Who gets one.** A `ui_qml` module with a C++ backend (`main` in
+`metadata.json`) and a `.rep`. A QML-only module is refused by name — a view
+framework IS the compiled backend, and with no backend there is nothing to
+bind Qt upward; its QML travels in the module's LGX. A module declaring
+`nix.external_libraries` is refused for the same reason the mobile `bare`
+output refuses it.
+
+**iOS only.** `packages.aarch64-android` carries no `view` attribute. Android's
+Qt is a set of shared objects, so the same module there is a `.so` naming
+`libQt6Core_arm64-v8a.so` and friends in `DT_NEEDED` — a different artifact
+with a different gate.
+
+**The gate.** Every `view` derivation runs `scripts/logos-view-gate.sh` in its
+`postFixup` (`postFixup` and not `installCheckPhase`, for the reason spelled
+out under `bare` above). It fails on: a missing entry point from the table; a
+QtCore marker symbol DEFINED in the image, or none of them undefined; a Qt
+symbol EXPORTED beyond the module's own edge; a defined `lp_*` or
+logos-qt-host symbol; a Qt / logos-protocol library in the load commands; or
+no `qrc:/logos/...` URL in the bytes. It is a plain script:
+
+```bash
+nix build .#packages.aarch64-ios-simulator.view
+./scripts/logos-view-gate.sh result/Library/Frameworks/my_view.framework
+```
+
+**Qt, compiled against and not linked**, is the whole trick and it has one
+sharp edge in CMake. A target that does not link `Qt6::Core` gets none of Qt's
+usage requirements: not the include directories (transitively — `Qt6::Qml`
+alone does not name `QtQmlIntegration`'s), not `cxx_std_17`, and not an
+AUTOMOC target at all, because CMake decides whether to run AUTOMOC by asking
+which Qt the target LINKS. `logos_view_framework()` walks the `Qt6::*`
+interface graph by hand, skipping `$<LINK_ONLY:...>` entries (those are Qt's
+own build settings — `-fno-exceptions`, `-Werror` — which no consumer is
+compiled with), and sets `QT_MAJOR_VERSION` on the target so AUTOMOC runs.
+Without that last line the plugin class has no moc, the link still succeeds
+(`-undefined dynamic_lookup` swallows the missing vtable) and the image has no
+`qt_plugin_instance` — which is what the gate's first clause catches.
+
 ### Example
 
 ```nix

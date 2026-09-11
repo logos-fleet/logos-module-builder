@@ -118,6 +118,14 @@ let
     inherit nixpkgs lib common parseMetadata logos-cpp-sdk logos-protocol logos-qt-sdk logos-plugin-qt logos-view-module logos-module uiBackend coreBackend builderRoot nix-bundle-lgx nix-bundle-logos-module-install;
   };
 
+  # The iOS view framework — the same module, the same generated tree, a
+  # different link. See buildViewFramework.nix.
+  buildViewFramework = import ./buildViewFramework.nix { inherit lib; };
+
+  # Imported here rather than taken as an argument: mkLogosQmlModule's caller
+  # (lib/default.nix) builds mkExternalLib from the same two values.
+  mkExternalLib = import ./mkExternalLib.nix { inherit lib common; };
+
   built =
     if hasBackend
     then buildCppPlugin {
@@ -207,6 +215,94 @@ let
         echo "Author-provided qmldir at ${viewDir}/qmldir preserved"
       fi
     '') // { inherit src; version = config.version; };
+
+
+  # ── the ui_qml module on iOS ──────────────────────────────────────────────
+  # `nix build .#packages.aarch64-ios.view`: the SAME module as the desktop Qt
+  # plugin, cross-compiled into one embedded framework that carries its Qt
+  # backend and its QML and binds Qt upward into the app image. The Native
+  # container loads it, the host instantiates the view object in-process (there
+  # is no ui-host subprocess on a phone) and the QML renders in the host's own
+  # engine.
+  #
+  # Only `view`, and only on the iOS keys. See buildViewFramework.nix for why
+  # Android is not the same artifact, and mkLogosModule's mobileBareFor for why
+  # the mobile keys carry one output rather than joining forAllSystems.
+  #
+  # THE GENERATED TREE COMES FROM THE BUILD PLATFORM, for the same reason the
+  # mobile Bare artifact's does: `generate` is source plus everything the code
+  # generators emitted, and a code generator is a host tool. The framework is a
+  # cross COMPILE of the native `generate`, which also makes it byte-identical
+  # in input to the desktop plugin.
+  viewFrameworkFor = { androidBuildSystem }:
+    common.forAllMobileSystems { inherit androidBuildSystem; }
+      ({ system, pkgs, buildSystem }:
+        let
+          mobileConfig = configFor system;
+
+          # A QML-only module has no .rep, no backend and no C++ at all, so
+          # there is nothing to compile into a framework — it would be a QML
+          # file in a Mach-O wrapper. Such a module ships its QML in the LGX
+          # and the host loads it directly.
+          refuseQmlOnly = throw ("logos-module-builder: module '"
+            + mobileConfig.name + "' is QML-only (no `main` in metadata.json), "
+            + "so it has no iOS `view` framework. A view framework IS the "
+            + "module's compiled Qt backend; with no backend there is nothing "
+            + "to bind Qt upward and the QML travels in the module's LGX.");
+
+          # `view` is "qml/Main.qml" (a path relative to src/ or to the project
+          # root); the framework's qrc is built from the DIRECTORY and entered
+          # at the file. Resolved here rather than in CMake because this is
+          # where the same two-layout search mkCombined does already lives.
+          viewDirRel = builtins.dirOf mobileConfig.view;
+          viewEntry = builtins.baseNameOf mobileConfig.view;
+          # Both layouts the QML pipeline accepts, in the order mkCombined
+          # tries them. `generate` snapshots the module's own tree, so the
+          # relative answer is the same there as in src.
+          qmlDirRel =
+            if builtins.pathExists "${src}/src/${viewDirRel}" then "src/${viewDirRel}"
+            else if builtins.pathExists "${src}/${viewDirRel}" then viewDirRel
+            else throw ("logos-module-builder: module '" + mobileConfig.name
+              + "' declares view \"" + mobileConfig.view + "\" but neither src/"
+              + viewDirRel + " nor " + viewDirRel + " exists. The iOS framework "
+              + "compiles that directory into its own qrc, so there is nothing "
+              + "to put in it.");
+
+          refuseExternalLibs = throw ("logos-module-builder: module '"
+            + mobileConfig.name + "' cannot be built as an iOS view framework "
+            + "yet: it declares nix.external_libraries ("
+            + lib.concatStringsSep ", " (mkExternalLib.getExternalLibNames mobileConfig)
+            + "). Those are staged into lib/ as BUILD-platform images by the "
+            + "module's own `generate` step and nothing here can recompile "
+            + "them — each comes from its own flake, which has to publish a "
+            + "package for " + system + ".");
+        in lib.optionalAttrs (pkgs.stdenv.hostPlatform.isiOS or false) {
+          view =
+            if !hasBackend then refuseQmlOnly
+            else if mkExternalLib.hasExternalLibs mobileConfig then refuseExternalLibs
+            else buildViewFramework {
+              inherit pkgs builderRoot;
+              config = mobileConfig;
+              generatedSrc = built.perSystem.${buildSystem}.moduleGenerate;
+              # Every one of these is compiled against and none is linked, so
+              # the BUILD platform's prefix is the honest answer — there is
+              # nothing in a header-only prefix to cross-compile.
+              logosSdk = logos-cpp-sdk.packages.${buildSystem}.default;
+              logosQtSdk = logos-qt-sdk.packages.${buildSystem}.default;
+              logosQtHost = logos-plugin-qt.packages.${buildSystem}.logos-qt-host;
+              logosProtocol = logos-protocol.packages.${buildSystem}.default;
+              logosModule = logos-module.packages.${buildSystem}.default;
+              viewTemplates = logos-view-module.packages.${buildSystem}.logos-view-templates;
+              viewInclude = logos-view-module.packages.${buildSystem}.include;
+              gateScript = builderRoot + "/scripts/logos-view-gate.sh";
+              qmlDir = qmlDirRel;
+              qmlEntry = viewEntry;
+            };
+        });
+
+  viewFrameworkPackages = viewFrameworkFor {
+    androidBuildSystem = common.defaultAndroidBuildSystem;
+  };
 
   # Package outputs
   packages = forAllSystems (system:
@@ -352,7 +448,9 @@ let
   ) packages;
 
 in {
-  packages = mergedPackages;
+  # The iOS keys are MERGED rather than folded into forAllSystems: they carry
+  # `view` and nothing else. See viewFrameworkFor above.
+  packages = mergedPackages // viewFrameworkPackages;
   checks = lib.mapAttrs (_: sysPkgs: {
     integration-test = sysPkgs.integration-test;
   }) integrationTestPackages;
