@@ -147,7 +147,7 @@ for m in "${QT_CORE_MARKERS[@]}"; do
 done
 if [ "$found_undefined" -eq 0 ]; then
     fail "not one QtCore symbol is undefined in $ARTIFACT" \
-         "" "— a view framework that references no Qt is not a Qt backend at all"
+         "— a view framework that references no Qt is not a Qt backend at all"
 fi
 
 # A broader sweep over the same question, one step weaker on purpose: a
@@ -196,7 +196,7 @@ fail_each "view framework links a forbidden library" "$LIB_RE" "$linked"
 qml_marker=$(tr -c '[:print:]' '\n' < "$ARTIFACT" | grep -m1 '^qrc:/logos/')
 if [ -z "$qml_marker" ]; then
     fail "no qrc:/logos/... entry URL in $ARTIFACT" \
-         "" "— logos_view_module_qml_url() would hand the host a view it does not carry"
+         "— logos_view_module_qml_url() would hand the host a view it does not carry"
 fi
 
 if [ "$failures" -gt 0 ]; then

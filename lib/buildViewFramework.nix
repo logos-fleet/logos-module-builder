@@ -127,10 +127,9 @@ pkgs.xcodeClang.mkDerivation {
     "-DLOGOS_VIEW_INCLUDE_DIR=${viewInclude}"
     "-DLOGOS_VIEW_EXTRA_INCLUDE_DIRS=${pkgs.pkgsBuildBuild.nlohmann_json}/include"
     "-DLOGOS_VIEW_VERSION=${config.version}"
-    # Resolved against the unpacked source root by cmake, which runs in
-    # <src>/build — hence the absolute form via CMAKE_SOURCE_DIR is not
-    # available here; both are passed relative to the source dir and made
-    # absolute in preConfigure.
+    # Relative to LOGOS_VIEW_QML_DIR, which preConfigure makes absolute below —
+    # the entry stays relative, because it is also the name the qrc path is
+    # built from.
     "-DLOGOS_VIEW_QML_ENTRY=${qmlEntry}"
   ] ++ pkgs.logosQtCrossCmakeFlags;
 
@@ -147,7 +146,7 @@ pkgs.xcodeClang.mkDerivation {
     export STRIP=$(xcrun --sdk ${appleSdk} --find strip)
     cmakeFlagsArray+=(-DCMAKE_SYSTEM_NAME=iOS)
     qmldir="$PWD/${qmlDir}"
-    [ -d "$qmldir" ] || { echo "no QML directory at $qmldir (metadata.json view: ${qmlEntry})" >&2; exit 1; }
+    [ -d "$qmldir" ] || { echo "no QML directory at $qmldir -- the generate tree has no ${qmlDir}, and the framework's qrc is built from it" >&2; exit 1; }
     cmakeFlagsArray+=("-DLOGOS_VIEW_QML_DIR=$qmldir")
   '';
 

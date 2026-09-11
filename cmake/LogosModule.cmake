@@ -374,20 +374,20 @@ function(_logos_module_sdk_includes TARGET GEN_DIR)
     # logos_ui_plugin_context.h, from logos-view-module — and FIRST, ahead of
     # the logos-qt-sdk root below.
     #
-    # As of the qt-sdk pin above, logos-view-module is the ONLY repo that ships
-    # this header, so ordering is no longer what decides which copy wins. It
-    # stays BEFORE anyway: this repo pins the two independently, and an older
-    # qt-sdk pin — a rollback, a branch, a consumer overriding the input — brings
-    # the duplicate straight back. Belt-and-braces now, load-bearing again the
-    # moment those pins disagree. This header and the view glue emitter are one MATCHED PAIR: the
-    # emitted `<name>_ui_glue.cpp` calls
+    # This header and the view glue emitter are one MATCHED PAIR: the emitted
+    # `<name>_ui_glue.cpp` calls
     # `_logos_codegen_::maybeUiPluginAboutToUnload(...)`, which only this header
-    # declares. Both now ship from logos-view-module under ONE pin, so they
-    # cannot disagree. logos-qt-sdk's copy is pinned SEPARATELY by this repo's
-    # flake.lock and drifts independently — resolving to it is how a build gets
-    # an emitter from one revision and a context header from another, and the
+    # declares. Both ship from logos-view-module under ONE pin, so they cannot
+    # disagree — but logos-qt-sdk's copy is pinned SEPARATELY by this repo's
+    # flake.lock and drifts independently, and resolving to it is how a build
+    # gets an emitter from one revision and a context header from another. The
     # symptom is a compile error inside generated code, far from the pin that
     # caused it.
+    #
+    # As of the qt-sdk pin above, logos-view-module is the ONLY repo that ships
+    # the header, so ordering is not currently what decides which copy wins. It
+    # stays BEFORE anyway: an older qt-sdk pin — a rollback, a branch, a
+    # consumer overriding the input — brings the duplicate straight back.
     #
     # Passed as a cache variable by every nix build (LOGOS_VIEW_INCLUDE_DIR) and
     # as an env var for a hand-run cmake in a dev shell, the same two channels
@@ -431,7 +431,6 @@ function(_logos_module_sdk_includes TARGET GEN_DIR)
         )
     endif()
 endfunction()
-
 
 #[=======================================================================[.rst:
 logos_bare_module
@@ -680,7 +679,6 @@ function(logos_bare_module)
     message(STATUS "Logos Bare module ${BARE_NAME} configured (protocol-free, no Qt)")
 endfunction()
 
-
 #[=======================================================================[.rst:
 logos_view_framework
 --------------------
@@ -738,7 +736,7 @@ function(logos_view_framework)
         message(FATAL_ERROR "logos_view_framework: LOGOS_VIEW_QML_ENTRY is not set.")
     endif()
 
-    set(_T ${VIEW_NAME}_view)
+    set(_TARGET ${VIEW_NAME}_view)
     set(_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated_code")
 
     # Qt is FOUND but never linked; see the header. Quick and Gui are in the
@@ -774,8 +772,8 @@ function(logos_view_framework)
     list(FILTER _GEN_CPPS EXCLUDE REGEX ".*/(logos_sdk|.*_api)\\.cpp$")
     list(APPEND _SRCS ${_GEN_CPPS} ${_GEN_HS})
 
-    add_library(${_T} SHARED ${_SRCS})
-    set_target_properties(${_T} PROPERTIES
+    add_library(${_TARGET} SHARED ${_SRCS})
+    set_target_properties(${_TARGET} PROPERTIES
         AUTOMOC ON
         # QT_MAJOR_VERSION is NOT decoration. CMake decides whether to create
         # an autogen target by asking the target which Qt it uses, and it asks
@@ -824,15 +822,15 @@ function(logos_view_framework)
 
         get_target_property(_inc ${_qt_t} INTERFACE_INCLUDE_DIRECTORIES)
         if(_inc)
-            target_include_directories(${_T} SYSTEM PRIVATE ${_inc})
+            target_include_directories(${_TARGET} SYSTEM PRIVATE ${_inc})
         endif()
         get_target_property(_def ${_qt_t} INTERFACE_COMPILE_DEFINITIONS)
         if(_def)
-            target_compile_definitions(${_T} PRIVATE ${_def})
+            target_compile_definitions(${_TARGET} PRIVATE ${_def})
         endif()
         get_target_property(_opt ${_qt_t} INTERFACE_COMPILE_OPTIONS)
         if(_opt)
-            target_compile_options(${_T} PRIVATE ${_opt})
+            target_compile_options(${_TARGET} PRIVATE ${_opt})
         endif()
         # THE LANGUAGE LEVEL, which is part of "compiled against Qt" and is
         # not optional. Qt carries it as a compile FEATURE (cxx_std_17, on
@@ -842,7 +840,7 @@ function(logos_view_framework)
         # nothing about this build.
         get_target_property(_feat ${_qt_t} INTERFACE_COMPILE_FEATURES)
         if(_feat)
-            target_compile_features(${_T} PRIVATE ${_feat})
+            target_compile_features(${_TARGET} PRIVATE ${_feat})
         endif()
 
         get_target_property(_deps ${_qt_t} INTERFACE_LINK_LIBRARIES)
@@ -869,35 +867,29 @@ function(logos_view_framework)
     # ...and a floor under the standard, because WHICH Qt target carries that
     # feature has moved between Qt minor versions. C++17 is qtbase 6's own
     # minimum.
-    set_target_properties(${_T} PROPERTIES
+    set_target_properties(${_TARGET} PROPERTIES
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF)
-    get_target_property(_std ${_T} CXX_STANDARD)
+    get_target_property(_std ${_TARGET} CXX_STANDARD)
     if(NOT _std OR _std LESS 17)
-        set_target_properties(${_T} PROPERTIES CXX_STANDARD 17)
+        set_target_properties(${_TARGET} PROPERTIES CXX_STANDARD 17)
     endif()
 
-    target_include_directories(${_T} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_BINARY_DIR}
-        ${_GEN_DIR}
-    )
-    _logos_module_sdk_includes(${_T} "${_GEN_DIR}")
+    _logos_module_sdk_includes(${_TARGET} "${_GEN_DIR}")
     # Header roots the plugin path reaches by LINKING a CMake target it must
     # not link here — nlohmann_json, which arrives through
     # logos-cpp-sdk::logos_headers on the desktop. Passed as a plain list of
     # directories by mkLogosQmlModule.
     if(LOGOS_VIEW_EXTRA_INCLUDE_DIRS)
-        target_include_directories(${_T} SYSTEM PRIVATE ${LOGOS_VIEW_EXTRA_INCLUDE_DIRS})
+        target_include_directories(${_TARGET} SYSTEM PRIVATE ${LOGOS_VIEW_EXTRA_INCLUDE_DIRS})
     endif()
     foreach(dir ${VIEW_INCLUDE_DIRS})
-        target_include_directories(${_T} PRIVATE ${dir})
+        target_include_directories(${_TARGET} PRIVATE ${dir})
     endforeach()
 
     # ── the .rep, both sides of it ──────────────────────────────────────────
-    qt6_add_repc_sources(${_T} ${VIEW_REP_FILE})
-    qt6_add_repc_replicas(${_T} ${VIEW_REP_FILE})
+    qt6_add_repc_sources(${_TARGET} ${VIEW_REP_FILE})
+    qt6_add_repc_replicas(${_TARGET} ${VIEW_REP_FILE})
 
     set(_REP_ABS "${VIEW_REP_FILE}")
     if(NOT IS_ABSOLUTE "${_REP_ABS}")
@@ -939,10 +931,10 @@ function(logos_view_framework)
                    "${_VIEW_GEN}/LogosViewPluginBase.h" @ONLY)
     configure_file("${LOGOS_VIEW_TEMPLATE_DIR}/LogosViewPluginBase.cpp.in"
                    "${_VIEW_GEN}/LogosViewPluginBase.cpp" @ONLY)
-    target_sources(${_T} PRIVATE
+    target_sources(${_TARGET} PRIVATE
         "${_VIEW_GEN}/LogosViewPluginBase.h"
         "${_VIEW_GEN}/LogosViewPluginBase.cpp")
-    target_include_directories(${_T} PRIVATE "${_VIEW_GEN}")
+    target_include_directories(${_TARGET} PRIVATE "${_VIEW_GEN}")
 
     # ── the QML, inside the image ───────────────────────────────────────────
     set(_QML_PREFIX "/logos/${VIEW_NAME}")
@@ -971,13 +963,13 @@ function(logos_view_framework)
     if(NOT EXISTS "${LOGOS_VIEW_QML_DIR}/qmldir")
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}/qmldir"
              "module com.logos.module.${VIEW_NAME}\n")
-        qt6_add_resources(${_T} "${VIEW_NAME}_qmldir"
+        qt6_add_resources(${_TARGET} "${VIEW_NAME}_qmldir"
             PREFIX "${_QML_PREFIX}"
             BASE "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}"
             FILES "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}/qmldir")
     endif()
     list(TRANSFORM _QRC_FILES PREPEND "${LOGOS_VIEW_QML_DIR}/")
-    qt6_add_resources(${_T} "${VIEW_NAME}_qml"
+    qt6_add_resources(${_TARGET} "${VIEW_NAME}_qml"
         PREFIX "${_QML_PREFIX}"
         BASE "${LOGOS_VIEW_QML_DIR}"
         FILES ${_QRC_FILES})
@@ -993,27 +985,27 @@ function(logos_view_framework)
     # The template is this file's sibling and belongs to the same repo.
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/LogosViewFrameworkAbi.cpp.in"
                    "${CMAKE_CURRENT_BINARY_DIR}/logos_view_abi_${VIEW_NAME}.cpp" @ONLY)
-    target_sources(${_T} PRIVATE
+    target_sources(${_TARGET} PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/logos_view_abi_${VIEW_NAME}.cpp")
 
     # ── the link that is not a link ─────────────────────────────────────────
     # `-fixup_chains` is the spike's variant B: a modern fixup format and no
     # dependency on the app being linked first. The deprecation warning on
     # `-undefined dynamic_lookup` is Apple's and is expected.
-    target_link_options(${_T} PRIVATE
+    target_link_options(${_TARGET} PRIVATE
         "-Wl,-undefined,dynamic_lookup"
         "-Wl,-fixup_chains"
         "-Wl,-headerpad_max_install_names")
-    set_target_properties(${_T} PROPERTIES
+    set_target_properties(${_TARGET} PROPERTIES
         INSTALL_NAME_DIR "@rpath"
         BUILD_WITH_INSTALL_NAME_DIR TRUE)
 
-    install(TARGETS ${_T}
+    install(TARGETS ${_TARGET}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
         RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
     )
 
-    message(STATUS "Logos view framework ${_T}: ${LOGOS_REP_CLASS} from "
+    message(STATUS "Logos view framework ${_TARGET}: ${LOGOS_REP_CLASS} from "
                    "${VIEW_REP_FILE}, QML at ${LOGOS_VIEW_QML_URL}, Qt bound upward")
 endfunction()
 
