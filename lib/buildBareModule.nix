@@ -168,6 +168,24 @@ let
   # is as strict as it ever was, and the ELF simply names where they come from.
   androidHostAbiSoname = "liblogos_protocol.so";
 
+  # The module's OWN declared dependencies — `nix.packages.build` and
+  # `nix.packages.runtime` from metadata.json, already resolved out of THIS
+  # target's package set by the caller. They are named here for the same reason
+  # the SDK is: under cross, nothing puts them anywhere CMake or the compiler
+  # looks.
+  #
+  # A native build never needed this. nix's cc-wrapper turns every buildInput
+  # into -isystem <prefix>/include through NIX_CFLAGS_COMPILE, so a header-only
+  # dependency is found whether or not the module's CMakeLists ever mentions
+  # it. The iOS stdenv is stdenvNoCC driving Xcode's clang (logos-nix's
+  # xcodeClang) and has no such wrapper, so the SAME metadata that builds
+  # natively used to fail the cross compile at the first #include. Measured on
+  # capability_module, whose only Boost use is boost/uuid (header-only):
+  #     fatal error: 'boost/uuid/uuid.hpp' file not found
+  # with pkgs.boost sitting in buildInputs the whole time.
+  modulePrefixes =
+    lib.unique (map toString (extraBuildInputs ++ extraNativeBuildInputs));
+
   # find_package(logos-cpp-sdk) does find_dependency(nlohmann_json), and under
   # cross neither prefix is on a path CMake searches by default: an iOS
   # toolchain re-roots find_package at the SDK sysroot. Name both explicitly
@@ -176,11 +194,32 @@ let
   # Mobile only: on a native build the cmake setup hook already puts every
   # buildInput on CMAKE_PREFIX_PATH, and passing -DCMAKE_PREFIX_PATH there
   # would REPLACE that list rather than add to it.
+  #
+  # `modulePrefixes` joins them so `cmake.find_packages` in metadata.json
+  # (logos_bare_module runs find_package(<pkg> REQUIRED) over that list)
+  # resolves against the TARGET's build of the package rather than failing --
+  # or, worse, finding the build platform's.
   findRootFlags = lib.optionals (isIos || isAndroid)
-    (let roots = lib.concatStringsSep ";" [ "${pkgs.nlohmann_json}" "${logosSdk}" ]; in [
+    (let roots = lib.concatStringsSep ";"
+      ([ "${pkgs.nlohmann_json}" "${logosSdk}" ] ++ modulePrefixes); in [
       "-DCMAKE_PREFIX_PATH=${roots}"
       "-DCMAKE_FIND_ROOT_PATH=${roots}"
     ]);
+
+  # ...and the compile line, which CMAKE_PREFIX_PATH does not touch. Only iOS:
+  # the Android package set is an ordinary nixpkgs cross stdenv and its
+  # cc-wrapper already does this.
+  #
+  # CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES, not -DCMAKE_CXX_FLAGS=-isystem ...,
+  # for a mechanical reason: nixpkgs' cmake hook expands `cmakeFlags` UNQUOTED
+  # (`cmake $cmakeDir $cmakeFlags "''${cmakeFlagsArray[@]}"`), so any flag
+  # containing a space is split into two arguments and cmake answers "Unknown
+  # argument -isystem". This variable takes a SEMICOLON-separated list of
+  # directories -- exactly what a toolchain file uses it for -- and adds each as
+  # a SYSTEM include on every target, which is also what nix's cc-wrapper does
+  # natively (so a dependency's headers stay exempt from the module's own
+  # warning flags).
+  iosStandardIncludeDirs = lib.optionals isIos (map (p: "${p}/include") modulePrefixes);
 
   # iOS: no nix cc-wrapper, so the sysroot and the architecture have to be
   # named. Deliberately NOT pkgs.logosQtCrossCmakeFlags — that carries
@@ -282,6 +321,9 @@ in mkDerivation ({
     "-DLOGOS_PROTOCOL_ROOT=${logosProtocol}"
   ]
   ++ findRootFlags
+  ++ lib.optional (iosStandardIncludeDirs != [])
+    ("-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES="
+     + lib.concatStringsSep ";" iosStandardIncludeDirs)
   ++ iosCmakeFlags
   ++ lib.optionals (rustStaticNames != []) [
     "-DLOGOS_MODULE_RUST_STATIC_LIBS=${lib.concatStringsSep ";" rustStaticNames}"

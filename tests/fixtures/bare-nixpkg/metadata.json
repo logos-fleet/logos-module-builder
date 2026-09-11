@@ -1,0 +1,19 @@
+{
+  "name": "bare_nixpkg",
+  "version": "1.0.0",
+  "description": "Fixture: a leaf universal C++ module whose only third-party dependency is a nixpkgs package named in metadata.json.",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "universal",
+  "category": "testing",
+  "main": "bare_nixpkg_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+
+  "nix": {
+    "external_libraries": [],
+    "packages": { "build": ["boost"], "runtime": ["boost"] },
+    "cmake": { "find_packages": ["Boost"], "extra_include_dirs": [] }
+  }
+}

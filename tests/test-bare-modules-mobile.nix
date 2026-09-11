@@ -27,6 +27,17 @@
 #                     artifact cannot come out of a whole-archive link of a
 #                     build-platform .a at all, so the arch assertions below
 #                     are what proves the Rust core crossed.
+#   bare_nixpkg       a module whose only third-party dependency is a NIXPKGS
+#                     package named in `nix.packages` / `cmake.find_packages`.
+#                     Natively that is invisible: nix's cc-wrapper puts every
+#                     buildInput on the compile line by itself. The iOS stdenv
+#                     is stdenvNoCC on Xcode's clang and re-roots find_package()
+#                     at the SDK sysroot, so the module's own dependency has to
+#                     be named to the cross build or the compile stops at the
+#                     first #include -- measured on capability_module as
+#                     "fatal error: 'boost/uuid/uuid.hpp' file not found" with
+#                     pkgs.boost in buildInputs the whole time. Realising the
+#                     derivation IS the assertion here.
 #   bare_extlib       a module with a `nix.external_libraries` entry, which is
 #                     the shape the builder CANNOT cross by itself: the library
 #                     comes from its own flake. The module's flake supplies a
@@ -52,6 +63,7 @@ let
 
   counter = mkFixture "bare-counter";
   rustModule = mkFixture "bare-rust";
+  nixpkgModule = mkFixture "bare-nixpkg";
 
   # ── the external library, built for whoever asks ────────────────────────
   # Stands in for nim-libp2p's `cbind` (libp2p_module) and `logosdelivery`
@@ -130,6 +142,7 @@ let
   modules = [
     { stem = "bare_counter_bare"; mobile = mobileOf counter; carries = null; }
     { stem = "bare_rust_module_bare"; mobile = mobileOf rustModule; carries = null; }
+    { stem = "bare_nixpkg_bare"; mobile = mobileOf nixpkgModule; carries = null; }
     { stem = "bare_extlib_bare"; mobile = mobileOf extlibModule; carries = "greet_answer"; }
   ];
 
