@@ -38,19 +38,19 @@ let trapped = false;
 // take the next frame. Catching it lets the page be told WHAT died, once, and
 // lets this side refuse everything after.
 function deliverGuarded(text) {
-    if (trapped) return;
-    try {
-        deliver(text);
-    } catch (err) {
-        trapped = true;
-        // The image is gone. Say so with the reason, on the same port the
-        // frames use; the loader page treats this exactly as it treats the
-        // Worker's own `error` event, which is still installed as the backstop
-        // for a trap that happens outside a delivered frame.
-        self.postMessage(JSON.stringify({
-            logosWasmTrap: String((err && err.message) || err),
-        }));
-    }
+  if (trapped) return;
+  try {
+    deliver(text);
+  } catch (err) {
+    trapped = true;
+    // The image is gone. Say so with the reason, on the same port the frames
+    // use; the loader page treats this exactly as it treats the Worker's own
+    // `error` event, which is still installed as the backstop for a trap that
+    // happens outside a delivered frame.
+    self.postMessage(JSON.stringify({
+      logosWasmTrap: String((err && err.message) || err),
+    }));
+  }
 }
 
 self.onmessage = (event) => {

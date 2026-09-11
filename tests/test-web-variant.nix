@@ -254,7 +254,8 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     // Worker catches (drive-trap.js drives the shipped worker and asserts that).
     const c = await spawn();
     c.send(CALL, { id: 30, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
-    if (!c.result(30) || c.result(30).payload.value !== 3) fail('a third image did not serve', c.heard);
+    const cAdd = c.result(30);
+    if (!cAdd || cAdd.payload.value !== 3) fail('a third image did not serve', c.heard);
 
     let trapped = null;
     try {
@@ -273,10 +274,12 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     const d = await spawn();
     d.send(CALL, { id: 40, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
     d.send(CALL, { id: 41, authToken: "", object: 'bare_counter', method: 'current', args: [] });
-    if (!d.result(40) || d.result(40).payload.value !== 3) {
+    const dAdd = d.result(40);
+    if (!dAdd || dAdd.payload.value !== 3) {
       fail('an image made after a trap does not serve', d.heard);
     }
-    if (!d.result(41) || d.result(41).payload.value !== 0) {
+    const dState = d.result(41);
+    if (!dState || dState.payload.value !== 0) {
       fail('an image made after a trap inherited state', d.heard);
     }
     console.log('PASS: an image made after a trap serves, from zero');
@@ -336,12 +339,13 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
 
-  const control = (key) => posted
+  // The transcript as messages. Read fresh each time, because everything below
+  // asserts on what the worker had posted by that point.
+  const heard = () => posted
     .map((t) => { try { return JSON.parse(t); } catch (e) { return null; } })
-    .filter((m) => m && m[key] !== undefined);
-  const results = () => posted
-    .map((t) => { try { return JSON.parse(t); } catch (e) { return null; } })
-    .filter((m) => m && m.type === RESULT);
+    .filter((m) => m);
+  const control = (key) => heard().filter((m) => m[key] !== undefined);
+  const results = () => heard().filter((m) => m.type === RESULT);
 
   const deliver = (payload) =>
     sandbox.self.onmessage({ data: JSON.stringify({ type: CALL, payload }) });
@@ -392,9 +396,12 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   # was just seen to produce, and answers it by closing the channel, which is the
   # only thing the host can hear. The end-to-end proof is a
   # `logoscore --container web` run.
-  grep -q 'logosWasmTrap' "$variant/index.html"     || { echo "FAIL: the loader page ignores the worker's trap report"; exit 1; }
-  grep -q 'channel.close()' "$variant/index.html"     || { echo "FAIL: the loader page does not close the channel when the image dies"; exit 1; }
-  grep -q 'worker.onerror' "$variant/index.html"     || { echo "FAIL: the loader page has no backstop for a trap outside a frame"; exit 1; }
+  grep -q 'logosWasmTrap' "$variant/index.html" \
+    || { echo "FAIL: the loader page ignores the worker's trap report"; exit 1; }
+  grep -q 'channel.close()' "$variant/index.html" \
+    || { echo "FAIL: the loader page does not close the channel when the image dies"; exit 1; }
+  grep -q 'worker.onerror' "$variant/index.html" \
+    || { echo "FAIL: the loader page has no backstop for a trap outside a frame"; exit 1; }
   echo "PASS: the loader page reports a dead image by closing its channel"
 
   mkdir -p $out
