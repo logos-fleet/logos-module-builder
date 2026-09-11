@@ -343,16 +343,45 @@ name. `packages.<buildSystem>.rust-crate-src` is published for this: the
 scaffold is generated once on the build platform and all four targets compile
 that same crate.
 
+**An external library crosses when its consumer says how.** `generate` staged
+each `nix.external_libraries` entry into `lib/` as a build-platform image, and
+nothing in the builder can recompile one — it comes from its own flake. So the
+module's flake answers, per target, with `mobilePackages` on the
+`externalLibInputs` entry:
+
+```nix
+externalLibInputs.libp2p = {
+  input = inputs.libp2p;              # the native half, as before
+  packages.default = "cbind";
+  # { system, pkgs, buildSystem } -> a derivation laid out lib/ + include/,
+  # built for that mobile system, or null to decline it.
+  mobilePackages = { system, pkgs, buildSystem }:
+    import ./nix/mobile-cbind.nix { inherit pkgs; target = system; /* … */ };
+};
+```
+
+A function rather than an attrset keyed by system, and the reason is not style:
+`pkgs` is the target package set the bare build is already using, and for
+Android its BUILD platform is a parameter (`androidBuildSystem`) — an attrset
+would have to pick one, and a Mac cannot realise a derivation whose build
+platform is `x86_64-linux`. Handing `pkgs` over also means the module's flake
+never instantiates a second copy of it.
+
+The result is staged OVER the build-platform image, which is deleted first:
+`_logos_find_external_lib` prefers a shared library to a static one, so a
+surviving `.dylib` would win. A target build should be STATIC — a Bare module on
+a phone carries every third-party library inside its own image, and on Android
+an unbundled soname fails the `DT_NEEDED` gate outright. `logos-libp2p-module`'s
+`nix/mobile-cbind.nix` is the worked example (nim cross-compile + two vendored C
+libraries, merged into one archive).
+
 **What still does not cross**, refused by name at eval rather than left to the
 linker:
 
-- a module declaring `nix.external_libraries`. Those are staged into `lib/` as
-  build-platform images by the module's own `generate` step and nothing here
-  can recompile them — each comes from its own flake, which has to publish a
-  package for the target and have it staged in place. Left to the linker it
-  surfaces as `ld: building for 'iOS-simulator', but linking in dylib ... built
-  for 'macOS'` forty lines into a link command, naming neither the library's
-  owner nor the fix;
+- an `nix.external_libraries` entry with no `mobilePackages` build for the
+  target. Left to the linker it surfaces as `ld: building for 'iOS-simulator',
+  but linking in dylib ... built for 'macOS'` forty lines into a link command,
+  naming neither the library's owner nor the fix;
 - a Go core, for the same reason with no cross toolchain wired in.
 
 And one platform fact: `packages.aarch64-android` is built from logos-nix's

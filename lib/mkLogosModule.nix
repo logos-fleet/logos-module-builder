@@ -1217,25 +1217,55 @@ let
 
           # `nix.external_libraries` are staged into lib/ by the generate step
           # as BUILD-PLATFORM images, and unlike a Rust core there is nothing
-          # here that could rebuild them: each comes from its OWN flake, which
-          # would have to publish a package for this target. Refused by name,
-          # at eval, rather than left to the linker — which reports it as
+          # in the BUILDER that could rebuild them: each comes from its own
+          # flake. So the module's flake answers for them, per target, through
+          # `externalLibInputs.<name>.mobilePackages` -- a FUNCTION of the same
+          # `{ system, pkgs, buildSystem }` forAllMobileSystems hands this
+          # scope, returning a derivation laid out like the native package
+          # (lib/ + include/) or null to decline that target.
+          #
+          # A function rather than an attrset keyed by system, for one reason
+          # that is not style: `pkgs` here is the target package set THIS bare
+          # build is using, and for Android its build platform is a parameter
+          # (`androidBuildSystem`). An attrset would have to pick one, and a
+          # Mac cannot realise a derivation whose build platform is
+          # x86_64-linux even when it can build the identical closure.
+          # Receiving `pkgs` also means the module's flake never instantiates a
+          # second copy of it.
+          #
+          # The result is staged OVER the build-platform image
+          # (buildBareModule's `stagedExternalLibs`).
+          #
+          # One that has no such package is still refused BY NAME, at eval,
+          # rather than left to the linker -- which reports it as
           #     ld: building for 'iOS-simulator', but linking in dylib
           #         (.../libfoo.dylib) built for 'macOS'
           # forty lines into a link command, naming neither whose library it is
           # nor what would fix it. (Measured on package_manager_module, whose
           # external `lgx` is exactly this case.)
           externalLibNames = mkExternalLib.getExternalLibNames mobileConfig;
+          mobileExternalLibFor = name:
+            let entry = externalLibInputs.${name} or null; in
+            if builtins.isAttrs entry && entry ? mobilePackages
+            then entry.mobilePackages { inherit system pkgs buildSystem; }
+            else null;
+          mobileExternalLibs = map
+            (name: { inherit name; drv = mobileExternalLibFor name; })
+            externalLibNames;
+          unportedExternalLibs =
+            map (e: e.name) (lib.filter (e: e.drv == null) mobileExternalLibs);
           refuseExternalLibs = throw ("logos-module-builder: module '"
             + mobileConfig.name + "' cannot be built as a Bare module for " + system
             + " yet: it declares nix.external_libraries ("
-            + lib.concatStringsSep ", " externalLibNames + "). Those are staged "
-            + "into lib/ as build-platform images by the module's own `generate` "
-            + "step, and nothing here can recompile them — each one comes from its "
-            + "own flake, which has to publish a package for " + system + " and "
-            + "have it staged in place. Until then this module has a native "
-            + "`bare` output and no mobile one. A codegen.rust core is different "
-            + "and DOES cross: the crate is rebuilt for the target here.");
+            + lib.concatStringsSep ", " unportedExternalLibs + ") with no build for "
+            + "that target. Those are staged into lib/ as build-platform images by "
+            + "the module's own `generate` step, and nothing in the builder can "
+            + "recompile them -- each one comes from its own flake. Give the "
+            + "`externalLibInputs` entry a `mobilePackages` function: it is handed "
+            + "{ system, pkgs, buildSystem } and returns a derivation laid out like "
+            + "the native package (lib/ + include/), which is staged over the "
+            + "build-platform one. A codegen.rust core is different and needs "
+            + "nothing: the crate is rebuilt for the target here.");
 
           # ── the Rust core, for the target ────────────────────────────────
           # `generate` staged a BUILD-platform archive into lib/; a Bare module
@@ -1374,7 +1404,7 @@ let
           # module is a Qt plugin object holding a LogosAPI and has no
           # protocol-free form to extract.
           bare =
-            if mkExternalLib.hasExternalLibs mobileConfig then refuseExternalLibs
+            if unportedExternalLibs != [ ] then refuseExternalLibs
             else if mobileConfig.go_static_lib_names != [ ] then refuseGoCore
             else buildBareModule {
               inherit pkgs builderRoot;
@@ -1395,6 +1425,7 @@ let
               rustStaticNames = lib.optional mobileIsRust mobileRustStaticName;
               stagedArchives = lib.optional mobileIsRust
                 "${mobileRustArchive}/lib/lib${mobileRustStaticName}.a";
+              stagedExternalLibs = mobileExternalLibs;
               extraGateChecks = androidDtNeededGate;
             };
         });
