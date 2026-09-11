@@ -11,6 +11,8 @@
 #   4. an artifact that DEFINES lp_invoke (as linking the
 #      logos-protocol archive would)                        -> FAIL, names lp_invoke
 #   5. the gate run against an empty/absent export list     -> REFUSE (exit 2)
+#   6. a nim type-descriptor name that CONTAINS "<digit>Q<Upper>"
+#      but is not a mangled C++ name at all                 -> PASS
 #
 # The ABI stubs are GENERATED from logos-protocol's published exports.txt, not
 # hand-copied: the gate reads that same list, and a test carrying its own copy
@@ -139,6 +141,23 @@ CPP
   grep -q "logos_protocol symbol DEFINED in a Bare module: lp_invoke" case4.log \
     || { echo "FAIL: carried-protocol failure did not name lp_invoke:"; cat case4.log; exit 1; }
   echo "PASS: carried logos-protocol code rejected by name"
+
+  echo "=== case 6: a nim type descriptor is not a Qt symbol ==="
+  # The Qt clause looks for Itanium mangling's "<len>Q<Uppercase>" (7QString).
+  # Unanchored, that is three characters of coincidence, and nim's type
+  # descriptors hit it for real: this exact name comes off libp2p_module's
+  # aarch64-ios Bare artifact, which links nim-libp2p's cbind and contains no
+  # Qt at all. The whole gate failed on it.
+  { gen_abi
+    cat <<'CPP'
+extern "C" __attribute__((visibility("default")))
+void NimDT___xGPxh4QRav413fifxHuqCw_oResultPrivate(void) {}
+CPP
+  } > nimcase.cpp
+  "$CXXBIN" -std=c++17 -fPIC -shared -o nimcase.${soExt} nimcase.cpp ${undefinedFlags}
+  bash "$gate" nimcase.${soExt} > case6.log 2>&1 \
+    || { echo "FAIL: the gate read a nim type descriptor as a Qt symbol:"; cat case6.log; exit 1; }
+  echo "PASS: a nim type descriptor containing <digit>Q<Upper> is not a Qt symbol"
 
   echo "=== case 5: the gate must REFUSE to run against no ABI list ==="
   # Anti-vacuity. An unset or empty list would make clause 1 pass every
