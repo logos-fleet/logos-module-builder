@@ -314,6 +314,126 @@ function(_logos_link_sdk_headers target)
 endfunction()
 
 #[=======================================================================[.rst:
+_logos_module_sdk_includes
+--------------------------
+
+Put the Logos SDK header roots on ``TARGET``'s include path.
+
+``GEN_DIR`` is the module's ``generated_code`` directory (the plugin build and
+the iOS view framework disagree about where that is, which is the only reason
+it is a parameter).
+
+Extracted from ``logos_module()`` so ``logos_view_framework()`` can compile the
+SAME translation units against the SAME headers. Two copies of this list is how
+a module would compile one way for the desktop and another way for a phone.
+#]=======================================================================]
+function(_logos_module_sdk_includes TARGET GEN_DIR)
+    # Include directories
+    target_include_directories(${TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${GEN_DIR}
+    )
+
+    # Add include directories based on layout type
+    if(LOGOS_MODULE_IS_SOURCE)
+        target_include_directories(${TARGET} PRIVATE ${LOGOS_MODULE_ROOT}/src)
+    else()
+        target_include_directories(${TARGET} PRIVATE ${LOGOS_MODULE_ROOT}/include/module_lib)
+    endif()
+
+    if(LOGOS_CPP_SDK_IS_SOURCE)
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/cpp
+            ${LOGOS_CPP_SDK_ROOT}/cpp/generated
+        )
+    else()
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/include
+            ${LOGOS_CPP_SDK_ROOT}/include/cpp
+            ${GEN_DIR}/include
+        )
+    endif()
+    # Qt HOST RUNTIME headers (LogosAPI, provider glue, legacy PluginInterface
+    # at core/interface.h). Both roots have the same two shapes — a repo
+    # checkout (cpp/, core/) and an installed prefix (include/cpp,
+    # include/core) — so only the root changes with the repoint.
+    if(LOGOS_QT_HOST_IS_SOURCE)
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_QT_HOST_ROOT}/cpp
+            ${LOGOS_QT_HOST_ROOT}/core
+        )
+    else()
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_QT_HOST_ROOT}/include
+            ${LOGOS_QT_HOST_ROOT}/include/cpp
+            ${LOGOS_QT_HOST_ROOT}/include/core
+        )
+    endif()
+    # logos_ui_plugin_context.h, from logos-view-module — and FIRST, ahead of
+    # the logos-qt-sdk root below.
+    #
+    # As of the qt-sdk pin above, logos-view-module is the ONLY repo that ships
+    # this header, so ordering is no longer what decides which copy wins. It
+    # stays BEFORE anyway: this repo pins the two independently, and an older
+    # qt-sdk pin — a rollback, a branch, a consumer overriding the input — brings
+    # the duplicate straight back. Belt-and-braces now, load-bearing again the
+    # moment those pins disagree. This header and the view glue emitter are one MATCHED PAIR: the
+    # emitted `<name>_ui_glue.cpp` calls
+    # `_logos_codegen_::maybeUiPluginAboutToUnload(...)`, which only this header
+    # declares. Both now ship from logos-view-module under ONE pin, so they
+    # cannot disagree. logos-qt-sdk's copy is pinned SEPARATELY by this repo's
+    # flake.lock and drifts independently — resolving to it is how a build gets
+    # an emitter from one revision and a context header from another, and the
+    # symptom is a compile error inside generated code, far from the pin that
+    # caused it.
+    #
+    # Passed as a cache variable by every nix build (LOGOS_VIEW_INCLUDE_DIR) and
+    # as an env var for a hand-run cmake in a dev shell, the same two channels
+    # LOGOS_VIEW_TEMPLATE_DIR uses.
+    if(NOT LOGOS_VIEW_INCLUDE_DIR AND DEFINED ENV{LOGOS_VIEW_INCLUDE_DIR})
+        set(LOGOS_VIEW_INCLUDE_DIR "$ENV{LOGOS_VIEW_INCLUDE_DIR}")
+    endif()
+    if(LOGOS_VIEW_INCLUDE_DIR)
+        # BEFORE, not the default append: a stale logos_ui_plugin_context.h on
+        # the qt-sdk root must lose, not win by accident of ordering.
+        target_include_directories(${TARGET} BEFORE PRIVATE
+            ${LOGOS_VIEW_INCLUDE_DIR}/include
+        )
+    endif()
+    # The Qt-typed headers logos-qt-sdk owns — logos_qt_lp_bridge.h /
+    # logos_qt_wire.h (emitted by name into generated Qt consumer wrappers).
+    # It no longer ships logos_ui_plugin_context.h; logos-view-module is its sole
+    # owner, and the block above stays ordered ahead of this one so an older
+    # qt-sdk pin that still carries a copy cannot win.
+    if(NOT "${LOGOS_QT_SDK_ROOT}" STREQUAL "${LOGOS_QT_HOST_ROOT}")
+        if(LOGOS_QT_SDK_IS_SOURCE)
+            target_include_directories(${TARGET} PRIVATE
+                ${LOGOS_QT_SDK_ROOT}/cpp
+            )
+        else()
+            target_include_directories(${TARGET} PRIVATE
+                ${LOGOS_QT_SDK_ROOT}/include
+                ${LOGOS_QT_SDK_ROOT}/include/cpp
+            )
+        endif()
+    endif()
+    # Protocol layer headers (transports, consumer core, lp_* C ABI)
+    if(EXISTS "${LOGOS_PROTOCOL_ROOT}/cpp/logos_protocol.h")
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_PROTOCOL_ROOT}/cpp
+        )
+    else()
+        target_include_directories(${TARGET} PRIVATE
+            ${LOGOS_PROTOCOL_ROOT}/include
+            ${LOGOS_PROTOCOL_ROOT}/include/cpp
+        )
+    endif()
+endfunction()
+
+
+#[=======================================================================[.rst:
 logos_bare_module
 -----------------
 
@@ -560,6 +680,343 @@ function(logos_bare_module)
     message(STATUS "Logos Bare module ${BARE_NAME} configured (protocol-free, no Qt)")
 endfunction()
 
+
+#[=======================================================================[.rst:
+logos_view_framework
+--------------------
+
+Build the **iOS view framework**: a ``type: ui_qml`` module as one embedded
+framework that carries its Qt backend and its QML, and binds Qt UPWARD into
+the app image.
+
+It is the same module, from the same generated tree, as the desktop Qt
+plugin — the ONE difference is the link. Nothing is linked at all:
+
+  * Qt is compiled against and never linked, so every Qt symbol the backend
+    calls stays UNDEFINED and dyld resolves it against the app's own static
+    Qt at load time. A Qt archive in here would be a second QtCore in the
+    process (ADR 0006 is what this implements).
+  * logos-qt-host (``LogosAPI``, the provider glue) and logos-protocol are
+    left undefined for exactly the same reason and by exactly the same
+    mechanism — the app image has them.
+  * ``-undefined dynamic_lookup`` is what says so to the linker
+    (spike ``ios-dlopen-bare-module``, Level 2).
+
+Three things are in the framework that are NOT in the desktop plugin:
+
+  * the QML, compiled into the image's own qrc — ``<App>.app/Frameworks/`` is
+    flat and read-only and there is nowhere beside the binary to put a view;
+  * the repc REPLICA, because on a phone there is no ``<name>_replica_factory``
+    plugin file to load separately;
+  * ``LogosViewFrameworkAbi.cpp.in``'s six C entry points, the whole surface
+    the host dlsym's.
+
+``logos_module()`` routes here when ``LOGOS_MODULE_VIEW_FRAMEWORK`` is ON and
+then returns. The nix wrapper (mkLogosQmlModule's ``view`` output) runs
+``scripts/logos-view-gate.sh`` over the result; this function only produces
+the artifact, the gate decides whether the link was honest.
+#]=======================================================================]
+function(logos_view_framework)
+    cmake_parse_arguments(VIEW "" "NAME;REP_FILE;QML_URI;QML_TYPE_NAME"
+        "SOURCES;FIND_PACKAGES;INCLUDE_DIRS" ${ARGN})
+
+    if(NOT VIEW_REP_FILE)
+        message(FATAL_ERROR
+            "logos_view_framework: ${VIEW_NAME} has no REP_FILE. A view framework "
+            "IS the typed source and the typed replica of one .rep — without it "
+            "there is no backend to bind the QML to and the module should ship "
+            "as QML alone.")
+    endif()
+    if(NOT LOGOS_VIEW_QML_DIR)
+        message(FATAL_ERROR
+            "logos_view_framework: LOGOS_VIEW_QML_DIR is not set. It names the "
+            "directory whose contents are compiled into the framework's qrc; "
+            "mkLogosQmlModule derives it from metadata.json's `view` field and "
+            "passes it in.")
+    endif()
+    if(NOT LOGOS_VIEW_QML_ENTRY)
+        message(FATAL_ERROR "logos_view_framework: LOGOS_VIEW_QML_ENTRY is not set.")
+    endif()
+
+    set(_T ${VIEW_NAME}_view)
+    set(_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated_code")
+
+    # Qt is FOUND but never linked; see the header. Quick and Gui are in the
+    # list because a view backend's headers reach them transitively even when
+    # its own code does not.
+    set(_QT_COMPONENTS Core Gui Qml Quick RemoteObjects)
+    find_package(Qt6 REQUIRED COMPONENTS ${_QT_COMPONENTS})
+    set(QT_VERSION_MAJOR 6)
+    foreach(pkg ${VIEW_FIND_PACKAGES})
+        find_package(${pkg} REQUIRED)
+    endforeach()
+
+    # Q_PLUGIN_METADATA(... FILE "metadata.json") is resolved by moc against
+    # the include path, so the document has to be beside the build.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/metadata.json")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/metadata.json"
+            "${CMAKE_CURRENT_BINARY_DIR}/metadata.json"
+            COPYONLY
+        )
+    endif()
+
+    # ── the sources ─────────────────────────────────────────────────────────
+    # The module's own, plus every generated translation unit — the same set
+    # the desktop plugin compiles. `logos_sdk.cpp` and the per-dependency
+    # `*_api.cpp` are #include'd by their siblings, never compiled twice.
+    set(_SRCS ${VIEW_SOURCES})
+    if(EXISTS "${_GEN_DIR}/logos_sdk.cpp")
+        list(APPEND _SRCS "${_GEN_DIR}/logos_sdk.cpp")
+    endif()
+    file(GLOB _GEN_CPPS CONFIGURE_DEPENDS "${_GEN_DIR}/*.cpp")
+    file(GLOB _GEN_HS CONFIGURE_DEPENDS "${_GEN_DIR}/*.h")
+    list(FILTER _GEN_CPPS EXCLUDE REGEX ".*/(logos_sdk|.*_api)\\.cpp$")
+    list(APPEND _SRCS ${_GEN_CPPS} ${_GEN_HS})
+
+    add_library(${_T} SHARED ${_SRCS})
+    set_target_properties(${_T} PROPERTIES
+        AUTOMOC ON
+        # QT_MAJOR_VERSION is NOT decoration. CMake decides whether to create
+        # an autogen target by asking the target which Qt it uses, and it asks
+        # by looking at the Qt libraries the target LINKS. This one links none,
+        # so the answer is "no Qt" and AUTOMOC is skipped — SILENTLY, with no
+        # diagnostic anywhere. What comes out is a framework whose plugin class
+        # has no moc: the link succeeds (`-undefined dynamic_lookup` swallows
+        # the missing vtable), the image loads, and it has no
+        # qt_plugin_instance for the host to call. This property is the
+        # documented way to answer that question directly.
+        QT_MAJOR_VERSION 6
+        PREFIX ""
+        OUTPUT_NAME "${VIEW_NAME}_view"
+        SUFFIX ".dylib"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/view"
+    )
+
+    # ── Qt, compiled against and not linked ─────────────────────────────────
+    # TRANSITIVELY, and that is the whole difficulty. A Qt module's usage
+    # requirements are spread over the Qt6::* targets it links: Qt6::Qml names
+    # its own Headers directory and gets QtQmlIntegration's from Qt6::QmlIntegration,
+    # and Qt6::Platform is where the C++ standard lives. A target that LINKS
+    # Qt6::Qml collects all of it for free; this one must not link, so it walks
+    # the same graph by hand. Taking only the named components' direct
+    # properties fails as `'QtQmlIntegration/qqmlintegration.h' file not found`
+    # — a missing header from a Qt module nobody named.
+    #
+    # Read at configure time rather than through $<TARGET_PROPERTY:...> so
+    # AUTOMOC sees a plain list: moc is handed the target's include
+    # directories, and a generator expression there fails as a missing
+    # Q_OBJECT at link time.
+    set(_qt_seen "")
+    set(_qt_queue "")
+    foreach(_c IN LISTS _QT_COMPONENTS)
+        list(APPEND _qt_queue "Qt6::${_c}")
+    endforeach()
+    while(_qt_queue)
+        list(POP_FRONT _qt_queue _qt_t)
+        if(NOT TARGET ${_qt_t})
+            continue()
+        endif()
+        if(${_qt_t} IN_LIST _qt_seen)
+            continue()
+        endif()
+        list(APPEND _qt_seen ${_qt_t})
+
+        get_target_property(_inc ${_qt_t} INTERFACE_INCLUDE_DIRECTORIES)
+        if(_inc)
+            target_include_directories(${_T} SYSTEM PRIVATE ${_inc})
+        endif()
+        get_target_property(_def ${_qt_t} INTERFACE_COMPILE_DEFINITIONS)
+        if(_def)
+            target_compile_definitions(${_T} PRIVATE ${_def})
+        endif()
+        get_target_property(_opt ${_qt_t} INTERFACE_COMPILE_OPTIONS)
+        if(_opt)
+            target_compile_options(${_T} PRIVATE ${_opt})
+        endif()
+        # THE LANGUAGE LEVEL, which is part of "compiled against Qt" and is
+        # not optional. Qt carries it as a compile FEATURE (cxx_std_17, on
+        # Qt6::Platform), inherited by LINKING. The diagnostic when it is
+        # missing is `no template named 'is_integral_v' in namespace 'std'`
+        # from inside qtypeinfo.h — twenty errors deep in a Qt header, naming
+        # nothing about this build.
+        get_target_property(_feat ${_qt_t} INTERFACE_COMPILE_FEATURES)
+        if(_feat)
+            target_compile_features(${_T} PRIVATE ${_feat})
+        endif()
+
+        get_target_property(_deps ${_qt_t} INTERFACE_LINK_LIBRARIES)
+        if(_deps)
+            foreach(_d IN LISTS _deps)
+                # $<LINK_ONLY:...> is SKIPPED, and it is the whole reason this
+                # loop can be trusted. Qt6::Core names Qt6::PlatformModuleInternal
+                # that way: those are Qt's own build settings — -fno-exceptions,
+                # -Werror, QT_NO_FOREACH, QT_NO_EXCEPTIONS — and CMake never gives
+                # them to a consumer, precisely because LINK_ONLY means "link,
+                # do not compile with". Following it anyway compiles the module
+                # under settings no Qt consumer has ever been built with; the
+                # first diagnostic is `cannot use 'throw' with exceptions
+                # disabled` inside logos_types.h.
+                if(_d MATCHES "LINK_ONLY")
+                    continue()
+                endif()
+                string(REGEX MATCHALL "Qt6::[A-Za-z0-9_]+" _qt_names "${_d}")
+                list(APPEND _qt_queue ${_qt_names})
+            endforeach()
+        endif()
+    endwhile()
+
+    # ...and a floor under the standard, because WHICH Qt target carries that
+    # feature has moved between Qt minor versions. C++17 is qtbase 6's own
+    # minimum.
+    set_target_properties(${_T} PROPERTIES
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    get_target_property(_std ${_T} CXX_STANDARD)
+    if(NOT _std OR _std LESS 17)
+        set_target_properties(${_T} PROPERTIES CXX_STANDARD 17)
+    endif()
+
+    target_include_directories(${_T} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${_GEN_DIR}
+    )
+    _logos_module_sdk_includes(${_T} "${_GEN_DIR}")
+    # Header roots the plugin path reaches by LINKING a CMake target it must
+    # not link here — nlohmann_json, which arrives through
+    # logos-cpp-sdk::logos_headers on the desktop. Passed as a plain list of
+    # directories by mkLogosQmlModule.
+    if(LOGOS_VIEW_EXTRA_INCLUDE_DIRS)
+        target_include_directories(${_T} SYSTEM PRIVATE ${LOGOS_VIEW_EXTRA_INCLUDE_DIRS})
+    endif()
+    foreach(dir ${VIEW_INCLUDE_DIRS})
+        target_include_directories(${_T} PRIVATE ${dir})
+    endforeach()
+
+    # ── the .rep, both sides of it ──────────────────────────────────────────
+    qt6_add_repc_sources(${_T} ${VIEW_REP_FILE})
+    qt6_add_repc_replicas(${_T} ${VIEW_REP_FILE})
+
+    set(_REP_ABS "${VIEW_REP_FILE}")
+    if(NOT IS_ABSOLUTE "${_REP_ABS}")
+        set(_REP_ABS "${CMAKE_CURRENT_SOURCE_DIR}/${VIEW_REP_FILE}")
+    endif()
+    file(READ "${_REP_ABS}" _REP_CONTENTS)
+    string(REGEX MATCH "class[ \t]+([A-Za-z_][A-Za-z0-9_]*)" _ "${_REP_CONTENTS}")
+    set(LOGOS_REP_CLASS "${CMAKE_MATCH_1}")
+    if(NOT LOGOS_REP_CLASS)
+        message(FATAL_ERROR "logos_view_framework: could not parse a class name from ${VIEW_REP_FILE}")
+    endif()
+    get_filename_component(LOGOS_REP_BASE "${VIEW_REP_FILE}" NAME_WE)
+
+    if(NOT VIEW_QML_URI)
+        set(VIEW_QML_URI "Logos.${LOGOS_REP_CLASS}")
+    endif()
+    if(NOT VIEW_QML_TYPE_NAME)
+        set(VIEW_QML_TYPE_NAME "${LOGOS_REP_CLASS}")
+    endif()
+    set(LOGOS_QML_URI "${VIEW_QML_URI}")
+    set(LOGOS_QML_TYPE_NAME "${VIEW_QML_TYPE_NAME}")
+
+    # The per-module LogosViewPlugin base the plugin class inherits — the same
+    # two templates, from the same LOGOS_VIEW_TEMPLATE_DIR, that the desktop
+    # plugin gets. A local copy here is how the phone and the desktop would
+    # come to disagree about what a view plugin is.
+    if(NOT LOGOS_VIEW_TEMPLATE_DIR AND DEFINED ENV{LOGOS_VIEW_TEMPLATE_DIR})
+        set(LOGOS_VIEW_TEMPLATE_DIR "$ENV{LOGOS_VIEW_TEMPLATE_DIR}")
+    endif()
+    if(NOT LOGOS_VIEW_TEMPLATE_DIR)
+        message(FATAL_ERROR
+            "logos_view_framework: LOGOS_VIEW_TEMPLATE_DIR is not set. The "
+            "LogosView*.in templates are owned by logos-view-module; there is "
+            "no local copy to fall back to.")
+    endif()
+    set(_VIEW_GEN "${CMAKE_CURRENT_BINARY_DIR}/view_plugin_base_${VIEW_NAME}")
+    file(MAKE_DIRECTORY "${_VIEW_GEN}")
+    configure_file("${LOGOS_VIEW_TEMPLATE_DIR}/LogosViewPluginBase.h.in"
+                   "${_VIEW_GEN}/LogosViewPluginBase.h" @ONLY)
+    configure_file("${LOGOS_VIEW_TEMPLATE_DIR}/LogosViewPluginBase.cpp.in"
+                   "${_VIEW_GEN}/LogosViewPluginBase.cpp" @ONLY)
+    target_sources(${_T} PRIVATE
+        "${_VIEW_GEN}/LogosViewPluginBase.h"
+        "${_VIEW_GEN}/LogosViewPluginBase.cpp")
+    target_include_directories(${_T} PRIVATE "${_VIEW_GEN}")
+
+    # ── the QML, inside the image ───────────────────────────────────────────
+    set(_QML_PREFIX "/logos/${VIEW_NAME}")
+    set(LOGOS_VIEW_QML_URL "qrc:${_QML_PREFIX}/${LOGOS_VIEW_QML_ENTRY}")
+    file(GLOB_RECURSE _QML_FILES RELATIVE "${LOGOS_VIEW_QML_DIR}"
+         CONFIGURE_DEPENDS "${LOGOS_VIEW_QML_DIR}/*")
+    if(NOT _QML_FILES)
+        message(FATAL_ERROR
+            "logos_view_framework: no QML under ${LOGOS_VIEW_QML_DIR}. A view "
+            "framework with no view is an artifact the host would load and then "
+            "have nothing to show.")
+    endif()
+    list(FIND _QML_FILES "${LOGOS_VIEW_QML_ENTRY}" _entry_idx)
+    if(_entry_idx EQUAL -1)
+        message(FATAL_ERROR
+            "logos_view_framework: the entry ${LOGOS_VIEW_QML_ENTRY} is not in "
+            "${LOGOS_VIEW_QML_DIR}. The host loads ${LOGOS_VIEW_QML_URL} and "
+            "there would be nothing at that URL.")
+    endif()
+
+    # The same per-module URI the desktop's generated qmldir declares, for the
+    # same reason: Qt's composite-type cache is keyed on (name, uri), so two
+    # modules with a Card.qml each cross-match in one host process when the
+    # uri is empty. Skipped when the author shipped one.
+    set(_QRC_FILES ${_QML_FILES})
+    if(NOT EXISTS "${LOGOS_VIEW_QML_DIR}/qmldir")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}/qmldir"
+             "module com.logos.module.${VIEW_NAME}\n")
+        qt6_add_resources(${_T} "${VIEW_NAME}_qmldir"
+            PREFIX "${_QML_PREFIX}"
+            BASE "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}"
+            FILES "${CMAKE_CURRENT_BINARY_DIR}/view_qmldir_${VIEW_NAME}/qmldir")
+    endif()
+    list(TRANSFORM _QRC_FILES PREPEND "${LOGOS_VIEW_QML_DIR}/")
+    qt6_add_resources(${_T} "${VIEW_NAME}_qml"
+        PREFIX "${_QML_PREFIX}"
+        BASE "${LOGOS_VIEW_QML_DIR}"
+        FILES ${_QRC_FILES})
+
+    # ── the C edge ──────────────────────────────────────────────────────────
+    set(LOGOS_VIEW_NAME "${VIEW_NAME}")
+    if(NOT LOGOS_VIEW_VERSION)
+        set(LOGOS_VIEW_VERSION "0.0.0")
+    endif()
+    # CMAKE_CURRENT_FUNCTION_LIST_DIR, not LOGOS_MODULE_BUILDER_ROOT: that one
+    # reaches a module build as an ENV var (the CMakeLists include line), not as
+    # a cmake variable, and an empty prefix here would configure_file from "/".
+    # The template is this file's sibling and belongs to the same repo.
+    configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/LogosViewFrameworkAbi.cpp.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/logos_view_abi_${VIEW_NAME}.cpp" @ONLY)
+    target_sources(${_T} PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/logos_view_abi_${VIEW_NAME}.cpp")
+
+    # ── the link that is not a link ─────────────────────────────────────────
+    # `-fixup_chains` is the spike's variant B: a modern fixup format and no
+    # dependency on the app being linked first. The deprecation warning on
+    # `-undefined dynamic_lookup` is Apple's and is expected.
+    target_link_options(${_T} PRIVATE
+        "-Wl,-undefined,dynamic_lookup"
+        "-Wl,-fixup_chains"
+        "-Wl,-headerpad_max_install_names")
+    set_target_properties(${_T} PROPERTIES
+        INSTALL_NAME_DIR "@rpath"
+        BUILD_WITH_INSTALL_NAME_DIR TRUE)
+
+    install(TARGETS ${_T}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
+        RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
+    )
+
+    message(STATUS "Logos view framework ${_T}: ${LOGOS_REP_CLASS} from "
+                   "${VIEW_REP_FILE}, QML at ${LOGOS_VIEW_QML_URL}, Qt bound upward")
+endfunction()
+
 #[=======================================================================[.rst:
 logos_module
 ------------
@@ -641,6 +1098,23 @@ function(logos_module)
             FIND_PACKAGES ${MODULE_FIND_PACKAGES}
             LINK_LIBRARIES ${MODULE_LINK_LIBRARIES}
             LINK_TARGETS ${MODULE_LINK_TARGETS}
+            INCLUDE_DIRS ${MODULE_INCLUDE_DIRS}
+        )
+        return()
+    endif()
+
+    # LOGOS_MODULE_VIEW_FRAMEWORK switches a `type: ui_qml` module to its iOS
+    # framework shape and returns, for the same reason and in the same place:
+    # the artifact is the same sources with a different link, so it cannot be
+    # produced by patching the plugin target after the fact.
+    if(LOGOS_MODULE_VIEW_FRAMEWORK)
+        logos_view_framework(
+            NAME ${MODULE_NAME}
+            REP_FILE ${MODULE_REP_FILE}
+            QML_URI ${MODULE_QML_URI}
+            QML_TYPE_NAME ${MODULE_QML_TYPE_NAME}
+            SOURCES ${MODULE_SOURCES}
+            FIND_PACKAGES ${MODULE_FIND_PACKAGES}
             INCLUDE_DIRS ${MODULE_INCLUDE_DIRS}
         )
         return()
@@ -823,108 +1297,7 @@ function(logos_module)
         )
     endif()
 
-    # Include directories
-    target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_BINARY_DIR}
-        ${PLUGINS_OUTPUT_DIR}
-    )
-
-    # Add include directories based on layout type
-    if(LOGOS_MODULE_IS_SOURCE)
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE ${LOGOS_MODULE_ROOT}/src)
-    else()
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE ${LOGOS_MODULE_ROOT}/include/module_lib)
-    endif()
-
-    if(LOGOS_CPP_SDK_IS_SOURCE)
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_CPP_SDK_ROOT}/cpp
-            ${LOGOS_CPP_SDK_ROOT}/cpp/generated
-        )
-    else()
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_CPP_SDK_ROOT}/include
-            ${LOGOS_CPP_SDK_ROOT}/include/cpp
-            ${PLUGINS_OUTPUT_DIR}/include
-        )
-    endif()
-    # Qt HOST RUNTIME headers (LogosAPI, provider glue, legacy PluginInterface
-    # at core/interface.h). Both roots have the same two shapes — a repo
-    # checkout (cpp/, core/) and an installed prefix (include/cpp,
-    # include/core) — so only the root changes with the repoint.
-    if(LOGOS_QT_HOST_IS_SOURCE)
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_QT_HOST_ROOT}/cpp
-            ${LOGOS_QT_HOST_ROOT}/core
-        )
-    else()
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_QT_HOST_ROOT}/include
-            ${LOGOS_QT_HOST_ROOT}/include/cpp
-            ${LOGOS_QT_HOST_ROOT}/include/core
-        )
-    endif()
-    # logos_ui_plugin_context.h, from logos-view-module — and FIRST, ahead of
-    # the logos-qt-sdk root below.
-    #
-    # As of the qt-sdk pin above, logos-view-module is the ONLY repo that ships
-    # this header, so ordering is no longer what decides which copy wins. It
-    # stays BEFORE anyway: this repo pins the two independently, and an older
-    # qt-sdk pin — a rollback, a branch, a consumer overriding the input — brings
-    # the duplicate straight back. Belt-and-braces now, load-bearing again the
-    # moment those pins disagree. This header and the view glue emitter are one MATCHED PAIR: the
-    # emitted `<name>_ui_glue.cpp` calls
-    # `_logos_codegen_::maybeUiPluginAboutToUnload(...)`, which only this header
-    # declares. Both now ship from logos-view-module under ONE pin, so they
-    # cannot disagree. logos-qt-sdk's copy is pinned SEPARATELY by this repo's
-    # flake.lock and drifts independently — resolving to it is how a build gets
-    # an emitter from one revision and a context header from another, and the
-    # symptom is a compile error inside generated code, far from the pin that
-    # caused it.
-    #
-    # Passed as a cache variable by every nix build (LOGOS_VIEW_INCLUDE_DIR) and
-    # as an env var for a hand-run cmake in a dev shell, the same two channels
-    # LOGOS_VIEW_TEMPLATE_DIR uses.
-    if(NOT LOGOS_VIEW_INCLUDE_DIR AND DEFINED ENV{LOGOS_VIEW_INCLUDE_DIR})
-        set(LOGOS_VIEW_INCLUDE_DIR "$ENV{LOGOS_VIEW_INCLUDE_DIR}")
-    endif()
-    if(LOGOS_VIEW_INCLUDE_DIR)
-        # BEFORE, not the default append: a stale logos_ui_plugin_context.h on
-        # the qt-sdk root must lose, not win by accident of ordering.
-        target_include_directories(${MODULE_NAME}_module_plugin BEFORE PRIVATE
-            ${LOGOS_VIEW_INCLUDE_DIR}/include
-        )
-    endif()
-    # The Qt-typed headers logos-qt-sdk owns — logos_qt_lp_bridge.h /
-    # logos_qt_wire.h (emitted by name into generated Qt consumer wrappers).
-    # It no longer ships logos_ui_plugin_context.h; logos-view-module is its sole
-    # owner, and the block above stays ordered ahead of this one so an older
-    # qt-sdk pin that still carries a copy cannot win.
-    if(NOT "${LOGOS_QT_SDK_ROOT}" STREQUAL "${LOGOS_QT_HOST_ROOT}")
-        if(LOGOS_QT_SDK_IS_SOURCE)
-            target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-                ${LOGOS_QT_SDK_ROOT}/cpp
-            )
-        else()
-            target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-                ${LOGOS_QT_SDK_ROOT}/include
-                ${LOGOS_QT_SDK_ROOT}/include/cpp
-            )
-        endif()
-    endif()
-    # Protocol layer headers (transports, consumer core, lp_* C ABI)
-    if(EXISTS "${LOGOS_PROTOCOL_ROOT}/cpp/logos_protocol.h")
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_PROTOCOL_ROOT}/cpp
-        )
-    else()
-        target_include_directories(${MODULE_NAME}_module_plugin PRIVATE
-            ${LOGOS_PROTOCOL_ROOT}/include
-            ${LOGOS_PROTOCOL_ROOT}/include/cpp
-        )
-    endif()
+    _logos_module_sdk_includes(${MODULE_NAME}_module_plugin "${PLUGINS_OUTPUT_DIR}")
 
     # Add custom include directories
     foreach(dir ${MODULE_INCLUDE_DIRS})

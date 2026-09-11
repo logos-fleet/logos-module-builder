@@ -370,6 +370,14 @@
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
         };
+        # The iOS view framework: a ui_qml module's Qt backend and its QML in
+        # one embedded framework, Qt bound upward into the app image. Same
+        # reason as bare-mobile for the aarch64-darwin key.
+        view-framework-ios = import ./tests/test-view-framework-ios.nix {
+          inherit pkgs;
+          mkLogosQmlModule = lib.mkLogosQmlModule;
+          fixturesRoot = ./tests/fixtures;
+        };
       });
 
       # Development shell for working on the builder itself
