@@ -4,13 +4,9 @@
 // third-party dependency comes from `nix.packages` in metadata.json rather
 // than from the SDK, and its source #includes that package's headers.
 //
-// That single property is what this fixture exists to cross-compile. A NATIVE
-// build hides it -- nix's cc-wrapper turns every buildInput into
-// `-isystem <prefix>/include`, so the header is found whether or not anything
-// in the build ever names the package. The iOS toolchain is stdenvNoCC driving
-// Xcode's clang and has no wrapper, and it re-roots find_package() at the SDK
-// sysroot, so a module that builds natively used to fail its cross compile at
-// the first #include. See lib/buildBareModule.nix (`modulePrefixes`).
+// That single property is what this fixture exists to cross-compile, because
+// a native build hides it and an iOS one does not. Why, and what the builder
+// does about it: lib/buildBareModule.nix (`modulePrefixes`).
 //
 // Boost, because that is the case measured: capability_module's only Boost use
 // is boost/uuid, which is header-only -- so nothing links and the failure was

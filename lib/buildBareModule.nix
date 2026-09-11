@@ -219,7 +219,10 @@ let
   # a SYSTEM include on every target, which is also what nix's cc-wrapper does
   # natively (so a dependency's headers stay exempt from the module's own
   # warning flags).
-  iosStandardIncludeDirs = lib.optionals isIos (map (p: "${p}/include") modulePrefixes);
+  iosIncludeFlags =
+    let dirs = lib.optionals isIos (map (p: "${p}/include") modulePrefixes); in
+    lib.optional (dirs != [])
+      "-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES=${lib.concatStringsSep ";" dirs}";
 
   # iOS: no nix cc-wrapper, so the sysroot and the architecture have to be
   # named. Deliberately NOT pkgs.logosQtCrossCmakeFlags — that carries
@@ -321,9 +324,7 @@ in mkDerivation ({
     "-DLOGOS_PROTOCOL_ROOT=${logosProtocol}"
   ]
   ++ findRootFlags
-  ++ lib.optional (iosStandardIncludeDirs != [])
-    ("-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES="
-     + lib.concatStringsSep ";" iosStandardIncludeDirs)
+  ++ iosIncludeFlags
   ++ iosCmakeFlags
   ++ lib.optionals (rustStaticNames != []) [
     "-DLOGOS_MODULE_RUST_STATIC_LIBS=${lib.concatStringsSep ";" rustStaticNames}"
