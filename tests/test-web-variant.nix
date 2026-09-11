@@ -22,6 +22,12 @@
 #     independently, and a mismatch between the glue filename the worker imports
 #     and the one the build emitted is a module that never loads, with no build
 #     error anywhere.
+#   * A PANIC IS A MODULE FAILURE AND NOT A PAGE CRASH. The counter's `panic`
+#     method runs __builtin_trap() -- what a Rust core built `panic = "abort"`
+#     compiles a panic to on wasm32. Driven three ways: the image traps rather
+#     than answering; the SHIPPED worker catches it, names it once and stops
+#     feeding the dead instance; and a fresh image serves immediately, from
+#     zero, which is what makes "restart it" the honest recovery here.
 #   * a Qt plugin shape has NO `web` output, for the same reason it has no
 #     `bare` one.
 #
@@ -238,11 +244,158 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     }
     console.log("PASS: a second Wasm host has its own token store and its own state");
 
+    // ── A PANIC IS A TRAP, AND A TRAP LEAVES THE IMAGE DEAD ─────────────────
+    //
+    // Slice 26's fourth criterion, at the only level this harness can see it:
+    // the module's `panic` method runs __builtin_trap(), which is what a Rust
+    // core built `panic = "abort"` compiles a panic to on wasm32. The engine
+    // turns it into a RuntimeError that unwinds out of the call INTO JS -- which
+    // is the whole reason the failure can be contained at all, and what the
+    // Worker catches (drive-trap.js drives the shipped worker and asserts that).
+    const c = await spawn();
+    c.send(CALL, { id: 30, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
+    if (!c.result(30) || c.result(30).payload.value !== 3) fail('a third image did not serve', c.heard);
+
+    let trapped = null;
+    try {
+      c.send(CALL, { id: 31, authToken: "", object: 'bare_counter', method: 'panic', args: [] });
+    } catch (e) {
+      trapped = e;
+    }
+    if (!trapped) fail('panic() did not trap: the image answered and kept running', c.heard);
+    if (c.result(31)) fail('panic() answered a Result before trapping', c.heard);
+    console.log('PASS: a panic inside the module traps the image (' + trapped + ')');
+
+    // ...and a FRESH image is a clean one. This is what makes "restart it" the
+    // right recovery for a Wasm host and a lie for a module whose state died
+    // with it: the image keeps nothing outside its own linear memory, so a new
+    // one serves immediately and starts from zero.
+    const d = await spawn();
+    d.send(CALL, { id: 40, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
+    d.send(CALL, { id: 41, authToken: "", object: 'bare_counter', method: 'current', args: [] });
+    if (!d.result(40) || d.result(40).payload.value !== 3) {
+      fail('an image made after a trap does not serve', d.heard);
+    }
+    if (!d.result(41) || d.result(41).payload.value !== 0) {
+      fail('an image made after a trap inherited state', d.heard);
+    }
+    console.log('PASS: an image made after a trap serves, from zero');
+
     console.log('cold instantiate: ' + hello.readyMs.toFixed(1) + ' ms, protocol ' + hello.protocol);
   })().catch((e) => { console.error('FAIL: ' + ((e && e.stack) || e)); process.exit(1); });
   JS
 
   node drive.js
+
+  # ── the Worker, driven ────────────────────────────────────────────────────
+  #
+  # The file above drives the wasm image. This one drives the SHIPPED
+  # logos-wasm-worker.js -- the real file, with the build's own substitutions in
+  # it -- inside a vm context that stands in for the Worker global scope. What it
+  # is asserting is the half of criterion 4 that belongs to this repo: a trap
+  # inside a delivered frame does not escape as an unnamed error and does not
+  # leave a dead image apparently willing to take the next call. It is reported,
+  # once, with its reason, on the same port the frames use; the loader page turns
+  # that into a closed channel, and the container into a module failure.
+  cp "$variant/logos-wasm-worker.js" ./worker.js
+  cat > drive-trap.js <<'JS'
+  const fs = require('fs');
+  const vm = require('vm');
+
+  const CALL = 1, RESULT = 2;
+  const fail = (why, seen) => {
+    console.error('FAIL: ' + why);
+    if (seen) console.error(JSON.stringify(seen, null, 2));
+    process.exit(1);
+  };
+
+  const source = fs.readFileSync('./worker.js', 'utf8');
+  if (!/LogosWasmModule\(/.test(source)) {
+    fail('the shipped worker does not call the factory the build named');
+  }
+
+  // Everything the Worker global scope gives this file. `logosOut` is the
+  // image's own port (see logos_wasm_post in wasm/logos_wasm_host.cpp) and it
+  // lands in the same transcript as the worker's own postMessage, because in a
+  // real Worker both go to the page.
+  const posted = [];
+  const sandbox = {
+    console,
+    setTimeout,
+    JSON,
+    importScripts: () => {
+      const factory = require('./host.js');
+      sandbox.LogosWasmModule = (opts) =>
+        factory(Object.assign({}, opts, { logosOut: (text) => posted.push(text) }));
+    },
+    self: {
+      postMessage: (text) => posted.push(text),
+      close: () => { sandbox.self.closed = true; },
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox);
+
+  const control = (key) => posted
+    .map((t) => { try { return JSON.parse(t); } catch (e) { return null; } })
+    .filter((m) => m && m[key] !== undefined);
+  const results = () => posted
+    .map((t) => { try { return JSON.parse(t); } catch (e) { return null; } })
+    .filter((m) => m && m.type === RESULT);
+
+  const deliver = (payload) =>
+    sandbox.self.onmessage({ data: JSON.stringify({ type: CALL, payload }) });
+
+  (async () => {
+    // The factory's promise settles on a microtask; nothing here may run before
+    // the worker has installed its deliver function.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    if (control('logosWasmHost').length !== 1) {
+      fail('the worker did not relay the image\'s hello', posted);
+    }
+
+    deliver({ id: 1, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
+    const answered = results().find((m) => m.payload.id === 1);
+    if (!answered || answered.payload.value !== 3) fail('the worker did not relay add(1,2)', posted);
+
+    // THE TRAP. Delivered exactly as the page delivers any other frame.
+    deliver({ id: 2, authToken: "", object: 'bare_counter', method: 'panic', args: [] });
+
+    const traps = control('logosWasmTrap');
+    if (traps.length !== 1) {
+      fail('a trap inside a delivered frame was not reported as logosWasmTrap', posted);
+    }
+    if (!traps[0].logosWasmTrap) fail('the trap was reported with no reason', posted);
+    if (results().find((m) => m.payload.id === 2)) fail('the trapping call answered a Result', posted);
+
+    // AND THE DOOR STAYS SHUT. A wasm instance that trapped is unusable; a
+    // worker that kept feeding it would answer garbage, or throw again, for the
+    // rest of the page's life.
+    const before = posted.length;
+    deliver({ id: 3, authToken: "", object: 'bare_counter', method: 'add', args: [1, 2] });
+    if (posted.length !== before) {
+      fail('the worker kept talking to a trapped image', posted.slice(before));
+    }
+
+    console.log('PASS: a trap in the image is reported once, with its reason, and '
+                + 'the worker stops delivering');
+  })().catch((e) => { console.error('FAIL: ' + ((e && e.stack) || e)); process.exit(1); });
+  JS
+
+  node drive-trap.js
+
+  # ── the loader page turns that report into a closed channel ───────────────
+  #
+  # A page is HTML and a DOM, and there is no browser in this derivation -- so
+  # what is checkable here is that the shipped page HANDLES the report the worker
+  # was just seen to produce, and answers it by closing the channel, which is the
+  # only thing the host can hear. The end-to-end proof is a
+  # `logoscore --container web` run.
+  grep -q 'logosWasmTrap' "$variant/index.html"     || { echo "FAIL: the loader page ignores the worker's trap report"; exit 1; }
+  grep -q 'channel.close()' "$variant/index.html"     || { echo "FAIL: the loader page does not close the channel when the image dies"; exit 1; }
+  grep -q 'worker.onerror' "$variant/index.html"     || { echo "FAIL: the loader page has no backstop for a trap outside a frame"; exit 1; }
+  echo "PASS: the loader page reports a dead image by closing its channel"
 
   mkdir -p $out
   cp "$variant/wasm-host.json" $out/

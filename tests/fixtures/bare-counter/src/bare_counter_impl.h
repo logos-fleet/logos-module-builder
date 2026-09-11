@@ -25,6 +25,21 @@ public:
     // has been called. The mobile host app (logos-basecamp) shows add(1, 2).
     int64_t add(int64_t a, int64_t b);
 
+    // TRAPS, DELIBERATELY, and it is the only thing in the tree that does.
+    // Slice 26's fourth criterion is that a panic inside a `web` variant's Wasm
+    // host surfaces as a MODULE failure rather than as a page crash, and a
+    // criterion nothing can fail is not a criterion: this method is what the
+    // web-variant check and the `logoscore --container web` run both call to
+    // make an image die on purpose.
+    //
+    // __builtin_trap() rather than abort(), because it is what a Rust core
+    // built `panic = "abort"` compiles a panic to on wasm32 -- an `unreachable`
+    // instruction the engine turns into a RuntimeError -- and because abort()
+    // would run emscripten's own teardown first, which is a tidier death than
+    // the one being tested. On a NATIVE host it is SIGILL, which is the same
+    // statement in that host's terms.
+    void panic();
+
 logos_events:
     // The counter's one event, and the reason it has one: the Native container
     // drives a Bare module through the emit callback of the module-impl C ABI,
