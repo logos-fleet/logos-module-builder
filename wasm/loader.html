@@ -28,10 +28,11 @@
   this page survives to report it, which is acceptance criterion 4 of slice 26.
   A page crash would take the container's view with it.
 
-  THREE CONTROL MESSAGES are consumed here and never forwarded, because they are
+  FOUR CONTROL MESSAGES are consumed here and never forwarded, because they are
   not transport frames: the image's `logosWasmHost` hello, its `logosWasmLog`
-  stdout/stderr lines, and `logosWasmError` from a runtime that failed to
-  instantiate. Everything else is a frame and goes straight across.
+  stdout/stderr lines, `logosWasmError` from a runtime that failed to
+  instantiate, and `logosWasmTrap` from one that died mid-call. Everything else
+  is a frame and goes straight across.
 -->
 <script>
 (async function () {
@@ -51,6 +52,30 @@
 
   const worker = new Worker('@WORKER_JS@');
 
+  // A WASM TRAP IS A MODULE FAILURE, NOT A PAGE CRASH -- and this is what makes
+  // the difference visible to the host. A panic inside the image aborts the wasm
+  // instance; this page is untouched and reports it, where a page crash would
+  // take the container's view with it.
+  //
+  // CLOSING THE CHANNEL IS THE REPORT. It is not a local tidy-up: the host's
+  // end of `window.logosChannelReady` treats a page closing its channel as the
+  // page saying it can no longer serve, and answers by tearing the page down --
+  // which the container sees as a lost page and the core records as a module
+  // that exited without being asked to. The supervision policy then decides
+  // whether to load it again, and a fresh page means a fresh Worker with a
+  // fresh image: the image keeps no state outside its own linear memory, so a
+  // restart is a clean one.
+  //
+  // Idempotent, because both routes below can fire for one death.
+  let reported = false;
+  const reportDeath = (why) => {
+    if (reported) return;
+    reported = true;
+    console.error('[logos-wasm ' + MODULE + '] the image trapped: ' + why);
+    worker.terminate();
+    try { channel.close(); } catch (e) { /* already gone */ }
+  };
+
   // Frames that arrive before the Worker's own runtime is up are QUEUED inside
   // the worker (see logos-wasm-worker.js), so this direction needs no buffer of
   // its own: postMessage to a live Worker is always accepted.
@@ -65,7 +90,8 @@
     try {
       const parsed = JSON.parse(text);
       if (parsed && typeof parsed === 'object'
-          && (parsed.logosWasmHost || parsed.logosWasmLog !== undefined || parsed.logosWasmError)) {
+          && (parsed.logosWasmHost || parsed.logosWasmLog !== undefined
+              || parsed.logosWasmError || parsed.logosWasmTrap)) {
         control = parsed;
       }
     } catch (e) { /* not JSON at all: forward it and let the peer complain */ }
@@ -74,6 +100,10 @@
       if (control.logosWasmHost) {
         log('serving; wasm ' + WASM_BYTES + ' bytes, cold instantiate '
             + control.readyMs.toFixed(1) + ' ms, protocol ' + control.protocol);
+      } else if (control.logosWasmTrap) {
+        // The Worker caught the trap and named it. Preferred over the `error`
+        // event below, which under -sASSERTIONS=0 carries no usable message.
+        reportDeath(control.logosWasmTrap);
       } else if (control.logosWasmError) {
         console.error('[logos-wasm ' + MODULE + '] the image failed to instantiate: '
                       + control.logosWasmError);
@@ -86,21 +116,11 @@
     channel.send(text);
   };
 
-  // A WASM TRAP IS A MODULE FAILURE, NOT A PAGE CRASH -- and this is the line
-  // that makes the difference visible. A Rust panic inside the image aborts the
-  // wasm instance; the Worker's `error` event fires, this page is untouched, and
-  // the container learns the module is gone the same way it learns a page died:
-  // the channel goes quiet and its next introspection round trip times out.
-  //
-  // Closing the channel is deliberate rather than letting it time out: it tells
-  // the container NOW, and the supervision policy that restarts a Failed module
-  // reloads this page, which spawns a fresh Worker with a fresh image. The image
-  // has no state outside its own linear memory, so a restart is a clean one.
-  worker.onerror = (event) => {
-    console.error('[logos-wasm ' + MODULE + '] the image trapped: '
-                  + (event.message || 'unknown'));
-    try { channel.close(); } catch (e) { /* already gone */ }
-  };
+  // THE BACKSTOP. The Worker reports a trap raised inside a delivered frame
+  // itself, with its reason; this catches the ones raised anywhere else -- in a
+  // callback the image scheduled, or before its first frame -- and a Worker that
+  // the engine killed outright.
+  worker.onerror = (event) => reportDeath(event.message || 'unknown');
 })();
 </script>
 </body>

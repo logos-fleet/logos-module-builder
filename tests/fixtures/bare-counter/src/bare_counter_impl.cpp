@@ -27,3 +27,10 @@ int64_t BareCounterImpl::add(int64_t a, int64_t b)
 {
     return a + b;
 }
+
+void BareCounterImpl::panic()
+{
+    // No return, and no cleanup: the point is a module whose image cannot be
+    // trusted afterwards, so that "restart it" is the only honest recovery.
+    __builtin_trap();
+}
