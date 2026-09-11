@@ -267,7 +267,10 @@ in mkDerivation ({
         rm -f "lib/lib${e.name}.$_ext" "lib/${e.name}.$_ext"
       done
       cp -fL ${e.drv}/lib/* lib/
-      if [ -d ${e.drv}/include ]; then cp -fL ${e.drv}/include/* lib/; fi
+      # -R: an include/ tree may have subdirectories (libp2p_module's staged
+      # TinyCBOR is reached as <tinycbor/cbor.h>), and a flat copy fails on the
+      # first one.
+      if [ -d ${e.drv}/include ]; then cp -RfL ${e.drv}/include/* lib/; fi
       chmod -R u+w lib
     '') stagedExternalLibs}
   '';
