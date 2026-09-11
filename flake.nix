@@ -205,8 +205,9 @@
       # them. The two used to disagree -- a module built through mkLogosModule
       # got the overlays and this flake's own checks did not -- which was
       # invisible while every overlay only patched a fetcher, and stops being so
-      # the moment one ADDS an attribute: checks.<sys>.web-variant reads
-      # pkgs.logosEmscriptenLlvm, which only exists on an overlaid set.
+      # the moment one ADDS an attribute: checks.<sys>.web-variant builds the
+      # `web` output, which reads pkgs.logosEmscriptenSetup and
+      # pkgs.logosWasmCmakeFlags -- attributes that only exist on an overlaid set.
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         inherit system;
         pkgs = import nixpkgs {

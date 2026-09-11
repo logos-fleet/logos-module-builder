@@ -69,12 +69,10 @@ const std::string kModuleName = LOGOS_WASM_MODULE_NAME;
 
 // ── the channel: the Worker's own message port ──────────────────────────────
 //
-// `postMessage` inside a Worker's global scope sends to whoever spawned it. That
-// is the whole binding — no addressing, no framing, no length prefix, which is
-// exactly the shape IMessageChannel was cut to (see message_channel.h).
-
-// OUT. `postMessage` in a Worker's global scope sends to whoever spawned it,
-// and that is the shipping path.
+// OUT. `postMessage` inside a Worker's global scope sends to whoever spawned it,
+// and that is both the shipping path and the whole binding — no addressing, no
+// framing, no length prefix, which is exactly the shape IMessageChannel was cut
+// to (see message_channel.h).
 //
 // THE FALLBACK IS NOT A CONVENIENCE. A host that is only reachable through a
 // Worker can only be tested through a browser, and the thing most worth testing
@@ -352,14 +350,15 @@ private:
     const void* m_connectionId = nullptr;
 };
 
-// The image's one provider, one channel, one connection. File statics rather
-// than members of a host object: there is exactly one of each per wasm instance
-// and the C entry points below have to reach them.
+// The image's one channel and one connection. File statics rather than members
+// of a host object: there is exactly one of each per wasm instance and the C
+// entry points below have to reach them. The provider is main()'s own static --
+// nothing outside main() names it, and the emit trampoline is handed it as
+// userData.
 double g_readyMs = 0.0;
 
 std::shared_ptr<WorkerPortChannel> g_channel;
 std::shared_ptr<logos::web::WebRpcConnection> g_connection;
-WasmModuleProvider* g_provider = nullptr;
 
 void emitTrampoline(const char* eventName, const char* dataJson, void* userData)
 {
@@ -396,7 +395,6 @@ int main()
     const auto started = std::chrono::steady_clock::now();
 
     static WasmModuleProvider provider;
-    g_provider = &provider;
 
     // The module's context, before the first dispatch, as the ABI requires.
     // There is no filesystem to persist into: emscripten's MEMFS is the image's

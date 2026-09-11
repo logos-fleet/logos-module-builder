@@ -915,12 +915,10 @@ let
       webVariant =
         if logosProtocolWasmPkg == null then null
         else buildWebModule {
-          inherit pkgs config builderRoot;
+          inherit pkgs config builderRoot logosSdk;
+          inherit extraNativeBuildInputs extraBuildInputs;
           generatedSrc = moduleGenerate;
-          inherit logosSdk;
           logosProtocolWasm = logosProtocolWasmPkg;
-          extraNativeBuildInputs = extraNativeBuildInputs;
-          extraBuildInputs = extraBuildInputs;
         };
 
       # Two header variants per module — Qt-typed and lp (Qt-free,

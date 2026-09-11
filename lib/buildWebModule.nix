@@ -14,7 +14,7 @@
 #     index.html             the loader page: spawns the Worker and relays
 #     logos-wasm-worker.js   the Worker: emscripten glue in, port relay out
 #     <name>_wasm.js         THE WASM HOST, wasm base64-embedded (-sSINGLE_FILE)
-#     <name>_wasm_image.wasm the same image emitted plainly
+#     <name>_wasm_image.wasm the same image, extracted back out of the glue
 #     wasm-host.json         what the build measured: sizes, module, protocol
 #
 # WHY THE IMAGE SHIPS TWICE. A `file://` page cannot `fetch()` a sibling `.wasm`
@@ -195,7 +195,10 @@ in pkgs.stdenv.mkDerivation {
     head -c 4 "$out_dir/${stem}_image.wasm" | od -An -c | grep -q '\\0   a   s   m' \
       || { echo "${stem}_image.wasm is not a wasm image"; exit 1; }
 
-    grep -q 'base64' "$out_dir/${stem}.js" \
+    # The same anchor the extraction above matched on: `AGFzbQ` is base64 for
+    # the \0asm magic, so this says "the glue carries A WASM IMAGE" rather than
+    # the far weaker "the glue mentions base64 somewhere".
+    grep -q 'base64Decode("AGFzbQ' "$out_dir/${stem}.js" \
       || { echo "${stem}.js does not carry the image: -sSINGLE_FILE did not take"; exit 1; }
 
     for f in index.html manifest.json logos-wasm-worker.js wasm-host.json; do

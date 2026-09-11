@@ -869,11 +869,16 @@ function(logos_wasm_module)
             "undefined and the link error would name the symbols, not the cause.")
     endif()
 
-    # The two links. `_EXPORTED_FUNCTIONS` names what JS reaches by ccall;
-    # without it the optimiser removes both, since nothing in the image calls
-    # them. `_main` is on the list because -sMODULARIZE defers it to the factory
-    # call rather than running it at load.
-    set(_WASM_COMMON_LINK_FLAGS
+    # THE LINK, once. `-sSINGLE_FILE=1` embeds the image in the glue, which is
+    # what makes a file:// page able to load it, and the nix wrapper extracts
+    # the image back out rather than linking a second time (wasm-opt minifies
+    # export names per link, so a second link is a DIFFERENT image).
+    #
+    # `_EXPORTED_FUNCTIONS` names what JS reaches by ccall; without it the
+    # optimiser removes them, since nothing in the image calls them. `_main` is
+    # on the list because -sMODULARIZE defers it to the factory call rather than
+    # running it at load.
+    set(_WASM_LINK_FLAGS
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=LogosWasmModule"
         # worker is the shipping environment; node is what lets a test drive
@@ -890,11 +895,12 @@ function(logos_wasm_module)
         # and never says why.
         "-sEXIT_RUNTIME=0"
         "-sASSERTIONS=0"
+        "-sSINGLE_FILE=1"
     )
 
     add_executable(${WASM_NAME}_wasm $<TARGET_OBJECTS:${_WASM_OBJS}>)
     target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_LOGOS_PROTOCOL_WASM_LIB} ${WASM_LINK_LIBRARIES})
-    target_link_options(${WASM_NAME}_wasm PRIVATE ${_WASM_COMMON_LINK_FLAGS} "-sSINGLE_FILE=1")
+    target_link_options(${WASM_NAME}_wasm PRIVATE ${_WASM_LINK_FLAGS})
     set_target_properties(${WASM_NAME}_wasm PROPERTIES
         SUFFIX ".js"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web"
