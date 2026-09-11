@@ -151,18 +151,23 @@ fail_each "missing module-impl ABI export" '.' "$missing" \
 # outright. Matching the mangled name catches a Qt reference even when no Qt
 # library ends up in the load commands (static Qt, inlined-away calls).
 #
-# ANCHORED AT ^_Z, because "<len>Q<Uppercase>" is a claim about ITANIUM
-# MANGLING and means nothing anywhere else. Unanchored it is three characters
-# of coincidence, and a real artifact hits it: nim mangles a type descriptor as
-# `NimDT___<base64ish>_<field>`, and
+# ANCHORED AT THE MANGLING PREFIX, because "<len>Q<Uppercase>" is a claim about
+# ITANIUM MANGLING and means nothing anywhere else. Unanchored it is three
+# characters of coincidence, and a real artifact hits it: nim mangles a type
+# descriptor as `NimDT___<base64ish>_<field>`, and
 #     NimDT___xGPxh4QRav413fifxHuqCw_oResultPrivate
 #                     ^^^^
 # is a "Qt symbol" by that rule. Measured on libp2p_module's three mobile Bare
 # artifacts, which link nim-libp2p's cbind and contain no Qt whatsoever -- the
-# gate failed all three, naming five to six such symbols. Every mangled C++
-# name begins `_Z` (Mach-O's extra leading underscore is stripped above), so
-# nothing Qt can be lost by asking for it.
-QT_SYMBOL_RE='^_Z.*[0-9]Q[A-Z]|^_?qt_[a-z]|QMetaObject|qRegisterMetaType|^_?ZN2Qt|qFatal|qWarning'
+# gate failed all three, naming five to six such symbols.
+#
+# `_?Z` and not `_Z`, for the same reason the `ZN2Qt` clause beside it already
+# spells it that way: every mangled C++ name begins `_Z`, but the normaliser
+# above strips ONE leading underscore from EITHER format, which leaves Mach-O's
+# `__ZN7QString...` as `_ZN7QString...` and ELF's `_ZN7QString...` as
+# `ZN7QString...`. Demanding the underscore would switch this clause off on
+# every ELF artifact -- a native Linux Bare module and the Android one.
+QT_SYMBOL_RE='^_?Z.*[0-9]Q[A-Z]|^_?qt_[a-z]|QMetaObject|qRegisterMetaType|^_?ZN2Qt|qFatal|qWarning'
 fail_each "Qt symbol in a Bare module" "$QT_SYMBOL_RE" "$all_syms"
 
 # ── 3. the logos-protocol ABI is referenced, never carried ──────────────────

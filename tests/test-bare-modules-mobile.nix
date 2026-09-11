@@ -133,8 +133,9 @@ let
     { stem = "bare_extlib_bare"; mobile = mobileOf extlibModule; carries = "greet_answer"; }
   ];
 
-  # The Mach-O spelling of a C symbol carries a leading underscore; the ELF one
-  # does not.
+  # The optional trailing argument of both check functions, omitted for a module
+  # with no external library to prove. The bare C name: each check adds its own
+  # format's spelling of it (Mach-O prefixes an underscore, ELF does not).
   carriesArg = m: if m.carries == null then "" else " " + m.carries;
 
   iosCases = lib.concatMapStrings (m: ''

@@ -13,6 +13,8 @@
 #   5. the gate run against an empty/absent export list     -> REFUSE (exit 2)
 #   6. a nim type-descriptor name that CONTAINS "<digit>Q<Upper>"
 #      but is not a mangled C++ name at all                 -> PASS
+#   7. a genuinely Itanium-mangled name carrying a Qt type,
+#      with no Qt linked                                    -> FAIL, names it
 #
 # The ABI stubs are GENERATED from logos-protocol's published exports.txt, not
 # hand-copied: the gate reads that same list, and a test carrying its own copy
@@ -158,6 +160,31 @@ CPP
   bash "$gate" nimcase.${soExt} > case6.log 2>&1 \
     || { echo "FAIL: the gate read a nim type descriptor as a Qt symbol:"; cat case6.log; exit 1; }
   echo "PASS: a nim type descriptor containing <digit>Q<Upper> is not a Qt symbol"
+
+  echo "=== case 7: a mangled name carrying a Qt type must FAIL, with no Qt linked ==="
+  # The other half of case 6. Case 2 links real Qt, but the one symbol it is
+  # GUARANTEED to expose is its own `qt_leak`, which the outright-named clause
+  # catches — so on its own it never proves the MANGLED clause fires. An
+  # incomplete `class QString` is all the mangler needs, and the resulting
+  # `_Z..P7QString` matches nothing else in the expression.
+  #
+  # It is also the test that keeps the clause alive on ELF: nm's leading
+  # underscore is stripped from either format, so the name reaching the gate is
+  # `_Z..` on Mach-O and `Z..` on ELF, and an anchor demanding `_Z` would pass
+  # this case on a Mac and silently stop gating on Android.
+  { gen_abi
+    cat <<'CPP'
+class QString;
+__attribute__((visibility("default"))) void bare_gate_mangled_qt(QString*) {}
+CPP
+  } > mangled.cpp
+  "$CXXBIN" -std=c++17 -fPIC -shared -o mangled.${soExt} mangled.cpp ${undefinedFlags}
+  if bash "$gate" mangled.${soExt} > case7.log 2>&1; then
+    echo "FAIL: the gate ACCEPTED a mangled name carrying a Qt type:"; cat case7.log; exit 1
+  fi
+  grep -q "Qt symbol in a Bare module: .*7QString" case7.log \
+    || { echo "FAIL: the mangled Qt name was not named as a Qt symbol:"; cat case7.log; exit 1; }
+  echo "PASS: a mangled Qt type reference rejected by name"
 
   echo "=== case 5: the gate must REFUSE to run against no ABI list ==="
   # Anti-vacuity. An unset or empty list would make clause 1 pass every
