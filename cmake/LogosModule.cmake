@@ -186,7 +186,15 @@ function(logos_find_dependencies)
         endif()
     endif()
     set(_protocol_found FALSE)
-    if(EXISTS "${LOGOS_PROTOCOL_ROOT}/cpp/logos_protocol.h" OR EXISTS "${LOGOS_PROTOCOL_ROOT}/include/cpp/logos_protocol.h")
+    # Three layouts, and the third is not a variant of the first two. A source
+    # checkout keeps headers under cpp/; the desktop package installs them under
+    # include/cpp/; the WASM package (logos-protocol nix/wasm.nix) installs the
+    # subset FLAT under include/, because it ships no CMake package config for a
+    # Config file to resolve include paths against and a nested cpp/ would be
+    # decoration.
+    if(EXISTS "${LOGOS_PROTOCOL_ROOT}/cpp/logos_protocol.h"
+       OR EXISTS "${LOGOS_PROTOCOL_ROOT}/include/cpp/logos_protocol.h"
+       OR EXISTS "${LOGOS_PROTOCOL_ROOT}/include/logos_protocol.h")
         set(_protocol_found TRUE)
     endif()
 
@@ -203,9 +211,11 @@ function(logos_find_dependencies)
 
     # logos-module (the Qt PluginInterface), logos-qt-sdk (the Qt developer
     # layer) and logos-qt-host (the Qt host runtime) are the Qt half of a module
-    # build. A Bare build (LOGOS_MODULE_BARE) never compiles or links any of
-    # them, so it is not required to have them — that absence is the point.
-    if(LOGOS_MODULE_BARE)
+    # build. Neither protocol-free artifact -- the Bare module
+    # (LOGOS_MODULE_BARE) nor the Wasm host (LOGOS_MODULE_WEB) -- compiles or
+    # links any of them, so neither is required to have them: that absence is
+    # the point, and under emscripten none of the three exists to be found.
+    if(LOGOS_MODULE_BARE OR LOGOS_MODULE_WEB)
         return()
     endif()
     if(NOT _module_found)
@@ -441,6 +451,37 @@ function(_logos_module_sdk_includes TARGET GEN_DIR)
     endif()
 endfunction()
 
+# THE QT-FREE HALF OF THE GENERATED TREE, selected once.
+#
+# Both protocol-free artifacts compile exactly this set -- the Bare module (a
+# shared object a native host dlopens) and the Wasm host (an executable that IS
+# the module) -- and they must not be able to drift apart: two globs would be two
+# opinions about which generated file is Qt-bearing, and the one that is wrong
+# fails at LINK, naming a Qt symbol, three steps from the filter that let it in.
+#
+# Kept:
+#   <name>_module_impl.cpp    the module-impl C ABI exports
+#   <name>_events_cdylib.cpp  typed event emitters (Qt-free flavour)
+#   logos_sdk.cpp             the lp_*-backed modules().<dep> surface
+# Dropped: the uniform Qt-plugin glue (<name>_cdylib_glue.cpp), the Qt provider
+# dispatch (<name>_dispatch.cpp, logos_provider_dispatch.cpp), the Qt event
+# sidecar (<name>_events.cpp) and the ui glue. <name>_api.cpp is #include'd by
+# logos_sdk.cpp, never compiled on its own.
+function(_logos_protocol_free_sources name caller module_sources out_var)
+    set(_gen_dir "${CMAKE_CURRENT_SOURCE_DIR}/generated_code")
+    file(GLOB _gen_cpps CONFIGURE_DEPENDS "${_gen_dir}/*.cpp")
+    list(FILTER _gen_cpps EXCLUDE REGEX
+        "/([^/]*_api|[^/]*_dispatch|[^/]*_events|[^/]*_cdylib_glue|[^/]*_qt_glue|[^/]*_ui_glue)\\.cpp$")
+
+    if(NOT _gen_cpps AND NOT module_sources)
+        message(FATAL_ERROR
+            "${caller}(${name}): nothing to compile. Expected the "
+            "Qt-free generated sources in ${_gen_dir} (run the module's "
+            "code generators first) or module SOURCES.")
+    endif()
+    set(${out_var} "${_gen_cpps}" PARENT_SCOPE)
+endfunction()
+
 #[=======================================================================[.rst:
 logos_bare_module
 -----------------
@@ -481,24 +522,7 @@ function(logos_bare_module)
         find_package(${pkg} REQUIRED)
     endforeach()
 
-    # The generated translation units, minus every Qt-bearing one. Kept:
-    #   <name>_module_impl.cpp    the module-impl C ABI exports
-    #   <name>_events_cdylib.cpp  typed event emitters (Qt-free flavour)
-    #   logos_sdk.cpp             the lp_*-backed modules().<dep> surface
-    # Dropped: the uniform Qt-plugin glue (<name>_cdylib_glue.cpp), the Qt
-    # provider dispatch (<name>_dispatch.cpp, logos_provider_dispatch.cpp), the
-    # Qt event sidecar (<name>_events.cpp) and the ui glue. <name>_api.cpp is
-    # #include'd by logos_sdk.cpp, never compiled on its own.
-    file(GLOB _BARE_GEN_CPPS CONFIGURE_DEPENDS "${_BARE_GEN_DIR}/*.cpp")
-    list(FILTER _BARE_GEN_CPPS EXCLUDE REGEX
-        "/([^/]*_api|[^/]*_dispatch|[^/]*_events|[^/]*_cdylib_glue|[^/]*_qt_glue|[^/]*_ui_glue)\\.cpp$")
-
-    if(NOT _BARE_GEN_CPPS AND NOT BARE_SOURCES)
-        message(FATAL_ERROR
-            "logos_bare_module(${BARE_NAME}): nothing to compile. Expected the "
-            "Qt-free generated sources in ${_BARE_GEN_DIR} (run the module's "
-            "code generators first) or module SOURCES.")
-    endif()
+    _logos_protocol_free_sources(${BARE_NAME} "logos_bare_module" "${BARE_SOURCES}" _BARE_GEN_CPPS)
 
     add_library(${_BARE_TARGET} SHARED ${BARE_SOURCES} ${_BARE_GEN_CPPS})
 
@@ -686,6 +710,218 @@ function(logos_bare_module)
     )
 
     message(STATUS "Logos Bare module ${BARE_NAME} configured (protocol-free, no Qt)")
+endfunction()
+
+#[=======================================================================[.rst:
+logos_wasm_module
+-----------------
+
+Build the **Wasm host**: the module, logos-protocol's web transport and a small
+relay, compiled to WebAssembly as ONE executable that runs in a Web Worker.
+
+The same sources as :cmake:command:`logos_bare_module` -- the module impl plus
+the Qt-free half of the generated tree -- with two differences that are the
+whole of what makes it a host rather than an artifact to be loaded:
+
+  * it LINKS logos-protocol's wasm subset (``liblogos_protocol_wasm.a``), where
+    a Bare module deliberately leaves ``lp_*`` undefined for its host to supply.
+    A wasm image has no dlopen and nothing to resolve against, so the image is
+    the host: the module and the protocol are one link;
+  * ``wasm/logos_wasm_host.cpp`` from this repo comes with it, supplying
+    ``main()``, the Worker's message port as an ``IMessageChannel``, and the
+    provider that answers Call/Methods/Subscribe/Token by driving the module's
+    module-impl C ABI.
+
+``logos_module()`` routes here when ``LOGOS_MODULE_WEB`` is ON and then returns,
+so a web build never calls ``logos_find_qt()``.
+
+ONE EXECUTABLE, built with ``-sSINGLE_FILE=1`` so the glue carries the image
+base64-embedded. That is not a size preference: a ``file://`` page cannot
+``fetch()`` a sibling ``.wasm``, and a webview loading a local entry document is
+exactly where this runs. The nix wrapper extracts the embedded image back out as
+``<name>_wasm_image.wasm`` -- the same bytes, for weighing and inspection --
+rather than linking a second time, which would produce a DIFFERENT image:
+wasm-opt minifies export names per link, so a separately-linked ``.wasm`` does
+not match the shipped glue and could not be run with it.
+#]=======================================================================]
+function(logos_wasm_module)
+    cmake_parse_arguments(
+        WASM
+        ""
+        "NAME"
+        "SOURCES;EXTERNAL_LIBS;FIND_PACKAGES;LINK_LIBRARIES;LINK_TARGETS;INCLUDE_DIRS"
+        ${ARGN}
+    )
+
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR
+            "logos_wasm_module(${WASM_NAME}): this output only exists under the "
+            "Emscripten toolchain. Configure with logos-nix's "
+            "pkgs.logosWasmCmakeFlags.")
+    endif()
+    if(NOT LOGOS_PROTOCOL_WASM_ROOT)
+        message(FATAL_ERROR
+            "logos_wasm_module(${WASM_NAME}): LOGOS_PROTOCOL_WASM_ROOT is not "
+            "set. It must name logos-protocol's wasm build "
+            "(packages.<system>.logos-protocol-wasm), which supplies both the "
+            "web transport and the lp_* doors this image links.")
+    endif()
+    # The host main lives in THIS repo, and a module's CMakeLists.txt reaches
+    # this file through the same variable -- which arrives in the ENVIRONMENT
+    # (nix sets env.LOGOS_MODULE_BUILDER_ROOT), not as a cmake -D. Read both, so
+    # a developer configuring by hand can pass either.
+    set(_wasm_builder_root "${LOGOS_MODULE_BUILDER_ROOT}")
+    if(NOT _wasm_builder_root)
+        set(_wasm_builder_root "$ENV{LOGOS_MODULE_BUILDER_ROOT}")
+    endif()
+    if(NOT _wasm_builder_root OR NOT EXISTS "${_wasm_builder_root}/wasm/logos_wasm_host.cpp")
+        message(FATAL_ERROR
+            "logos_wasm_module(${WASM_NAME}): wasm/logos_wasm_host.cpp was not "
+            "found. LOGOS_MODULE_BUILDER_ROOT must name this repo's root; it "
+            "resolved to '${_wasm_builder_root}'.")
+    endif()
+
+    foreach(pkg ${WASM_FIND_PACKAGES})
+        find_package(${pkg} REQUIRED)
+    endforeach()
+
+    _logos_protocol_free_sources(${WASM_NAME} "logos_wasm_module" "${WASM_SOURCES}" _WASM_GEN_CPPS)
+
+    set(_WASM_OBJS ${WASM_NAME}_wasm_objs)
+    add_library(${_WASM_OBJS} OBJECT
+        ${WASM_SOURCES}
+        ${_WASM_GEN_CPPS}
+        "${_wasm_builder_root}/wasm/logos_wasm_host.cpp"
+    )
+
+    # No QObject anywhere in this image; AUTOMOC is on directory-wide for the
+    # plugin build and would demand Qt's moc.
+    set_target_properties(${_WASM_OBJS} PROPERTIES
+        AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_compile_features(${_WASM_OBJS} PRIVATE cxx_std_17)
+
+    # Which module this image serves. A file-scope constant rather than a
+    # runtime lookup: one image is one module, and there is nothing in a Worker
+    # to discover it from.
+    target_compile_definitions(${_WASM_OBJS} PRIVATE
+        LOGOS_WASM_MODULE_NAME="${WASM_NAME}")
+
+    target_include_directories(${_WASM_OBJS} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated_code"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated_code/include"
+        # The wasm protocol's headers: logos_module_impl.h and the web
+        # transport's own (message_channel.h, web_rpc_connection.h,
+        # incoming_call_handler.h, json_mapping.h). Flat, as nix/wasm.nix
+        # installs them.
+        "${LOGOS_PROTOCOL_WASM_ROOT}/include"
+    )
+
+    if(LOGOS_CPP_SDK_IS_SOURCE)
+        target_include_directories(${_WASM_OBJS} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/cpp
+            ${LOGOS_CPP_SDK_ROOT}/cpp/generated
+        )
+    else()
+        target_include_directories(${_WASM_OBJS} PRIVATE
+            ${LOGOS_CPP_SDK_ROOT}/include
+            ${LOGOS_CPP_SDK_ROOT}/include/cpp
+        )
+    endif()
+
+    foreach(dir ${WASM_INCLUDE_DIRS})
+        target_include_directories(${_WASM_OBJS} PRIVATE ${dir})
+    endforeach()
+
+    # NOT _logos_link_sdk_headers(), and the reason is a cmake rule rather than
+    # a preference. That helper does find_package(logos-cpp-sdk CONFIG), and an
+    # installed SDK's generated ConfigVersion.cmake refuses a consumer whose
+    # CMAKE_SIZEOF_VOID_P differs from the one it was written on:
+    #
+    #   Could not find a configuration file for package "logos-cpp-sdk" that is
+    #   compatible with requested version ""
+    #     ... logos-cpp-sdkConfig.cmake, version: 0.2.0 (64bit)
+    #
+    # wasm32 is a 32-bit pointer target, so every 64-bit-built package config in
+    # the store is rejected for it -- a rejection whose message says "version",
+    # which is why it is worth naming here.
+    #
+    # Nothing is lost. What that target carries is an include path for the
+    # Qt-free SDK headers, which this function already puts on the line
+    # explicitly above, plus nlohmann_json. nlohmann_json's own config is
+    # ARCH_INDEPENDENT (it is header-only) and resolves for wasm32 unchanged.
+    find_package(nlohmann_json REQUIRED)
+    target_link_libraries(${_WASM_OBJS} PRIVATE nlohmann_json::nlohmann_json)
+
+    find_library(_LOGOS_PROTOCOL_WASM_LIB
+        NAMES logos_protocol_wasm
+        PATHS "${LOGOS_PROTOCOL_WASM_ROOT}/lib"
+        NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+    if(NOT _LOGOS_PROTOCOL_WASM_LIB)
+        message(FATAL_ERROR
+            "liblogos_protocol_wasm.a was not found in "
+            "${LOGOS_PROTOCOL_WASM_ROOT}/lib. Refusing to link a Wasm host with "
+            "no protocol in it: every lp_* the generated glue calls would be "
+            "undefined and the link error would name the symbols, not the cause.")
+    endif()
+
+    # The two links. `_EXPORTED_FUNCTIONS` names what JS reaches by ccall;
+    # without it the optimiser removes both, since nothing in the image calls
+    # them. `_main` is on the list because -sMODULARIZE defers it to the factory
+    # call rather than running it at load.
+    set(_WASM_COMMON_LINK_FLAGS
+        "-sMODULARIZE=1"
+        "-sEXPORT_NAME=LogosWasmModule"
+        # worker is the shipping environment; node is what lets a test drive
+        # the image without a browser (see logos_wasm_post's fallback in
+        # wasm/logos_wasm_host.cpp), and web costs nothing and makes the same
+        # glue usable from a page during debugging.
+        "-sENVIRONMENT=web,worker,node"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sEXPORTED_FUNCTIONS=['_main','_logos_wasm_deliver','_logos_wasm_ready_ms']"
+        "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
+        # A trap must kill the Worker, which the loader page reports as a module
+        # failure. Without this emscripten's abort() throws a JS exception that
+        # an unlucky catch could swallow, leaving a module that answers nothing
+        # and never says why.
+        "-sEXIT_RUNTIME=0"
+        "-sASSERTIONS=0"
+    )
+
+    add_executable(${WASM_NAME}_wasm $<TARGET_OBJECTS:${_WASM_OBJS}>)
+    target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_LOGOS_PROTOCOL_WASM_LIB} ${WASM_LINK_LIBRARIES})
+    target_link_options(${WASM_NAME}_wasm PRIVATE ${_WASM_COMMON_LINK_FLAGS} "-sSINGLE_FILE=1")
+    set_target_properties(${WASM_NAME}_wasm PROPERTIES
+        SUFFIX ".js"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web"
+    )
+
+    foreach(target ${WASM_LINK_TARGETS})
+        if(TARGET ${target})
+            target_link_libraries(${WASM_NAME}_wasm PRIVATE ${target})
+        else()
+            message(FATAL_ERROR
+                "LINK_TARGETS target '${target}' was not defined before "
+                "logos_module(). Refusing to silently drop a configured link target.")
+        endif()
+    endforeach()
+
+    foreach(ext_lib ${WASM_EXTERNAL_LIBS})
+        _logos_find_external_lib(${ext_lib} _ext_path _ext_include _ext_lib_dir)
+        if(NOT _ext_path)
+            message(FATAL_ERROR
+                "External library '${ext_lib}' was not found in ${_ext_lib_dir}. "
+                "Refusing to build a Wasm host with a missing dependency.")
+        endif()
+        target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_ext_path})
+        target_include_directories(${_WASM_OBJS} PRIVATE ${_ext_include})
+    endforeach()
+
+    message(STATUS "Logos Wasm host ${WASM_NAME} configured (web transport only, no Qt)")
 endfunction()
 
 #[=======================================================================[.rst:
@@ -1093,6 +1329,24 @@ function(logos_module)
     # link line. mkLogosModule's `bare` output is what sets it.
     if(LOGOS_MODULE_BARE)
         logos_bare_module(
+            NAME ${MODULE_NAME}
+            SOURCES ${MODULE_SOURCES}
+            EXTERNAL_LIBS ${MODULE_EXTERNAL_LIBS}
+            FIND_PACKAGES ${MODULE_FIND_PACKAGES}
+            LINK_LIBRARIES ${MODULE_LINK_LIBRARIES}
+            LINK_TARGETS ${MODULE_LINK_TARGETS}
+            INCLUDE_DIRS ${MODULE_INCLUDE_DIRS}
+        )
+        return()
+    endif()
+
+    # LOGOS_MODULE_WEB switches this call to the Wasm host: the same
+    # protocol-free sources as the Bare artifact, plus logos-protocol's wasm
+    # subset and this repo's host main, linked into one wasm executable. Same
+    # place and same reason as the branch above -- nothing below runs, so no Qt
+    # is looked for in an image that cannot have any.
+    if(LOGOS_MODULE_WEB)
+        logos_wasm_module(
             NAME ${MODULE_NAME}
             SOURCES ${MODULE_SOURCES}
             EXTERNAL_LIBS ${MODULE_EXTERNAL_LIBS}

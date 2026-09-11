@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>@MODULE@ (wasm)</title>
+</head>
+<body>
+<!--
+  THE LOADER PAGE of a `web` variant built from a Bare module.
+
+  It is a RELAY and nothing else. It decodes no transport message, holds no
+  token and implements no part of a module: the module is the wasm image running
+  in the Worker this page spawns, and everything below moves opaque JSON texts
+  between that Worker's port and the channel the host handed the page.
+
+      container ── webview bridge ──> window.logosChannelReady
+                                              |    ^
+                                              v    |
+                                        worker.postMessage / onmessage
+                                              |    ^
+                                              v    |
+                                         the wasm image
+
+  WHY A WORKER AND NOT THE PAGE'S OWN THREAD. A module's dispatch is synchronous
+  C++; running it on the page thread would block the webview's event loop, and on
+  a phone that is the UI thread of the host app. It also gives the image a
+  failure boundary: a wasm trap (a Rust panic, an abort()) kills the Worker and
+  this page survives to report it, which is acceptance criterion 4 of slice 26.
+  A page crash would take the container's view with it.
+
+  THREE CONTROL MESSAGES are consumed here and never forwarded, because they are
+  not transport frames: the image's `logosWasmHost` hello, its `logosWasmLog`
+  stdout/stderr lines, and `logosWasmError` from a runtime that failed to
+  instantiate. Everything else is a frame and goes straight across.
+-->
+<script>
+(async function () {
+  const MODULE = '@MODULE@';
+  // The wasm image's own byte size, measured at BUILD time (the shipped glue
+  // carries the image base64-embedded, so nothing at runtime can weigh it).
+  // Logged beside the cold instantiate time the image measures for itself --
+  // slice 26 asks for both, and they come from different places by nature.
+  const WASM_BYTES = @WASM_BYTES@;
+
+  const log = (...a) => console.log('[logos-wasm ' + MODULE + ']', ...a);
+
+  // The host's end. `window.logosChannelReady` is the webview backend's
+  // contract -- a Promise of the five-method channel shape in logos-js-sdk's
+  // README -- and it is the ONE host-specific thing in this file.
+  const channel = await window.logosChannelReady;
+
+  const worker = new Worker('@WORKER_JS@');
+
+  // Frames that arrive before the Worker's own runtime is up are QUEUED inside
+  // the worker (see logos-wasm-worker.js), so this direction needs no buffer of
+  // its own: postMessage to a live Worker is always accepted.
+  channel.setReceiver((text) => worker.postMessage(text));
+
+  worker.onmessage = (event) => {
+    const text = typeof event.data === 'string' ? event.data : JSON.stringify(event.data);
+
+    // Control, not transport. Parsed defensively: a transport frame is also
+    // JSON, and misreading one as control would silently drop it.
+    let control = null;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object'
+          && (parsed.logosWasmHost || parsed.logosWasmLog !== undefined || parsed.logosWasmError)) {
+        control = parsed;
+      }
+    } catch (e) { /* not JSON at all: forward it and let the peer complain */ }
+
+    if (control) {
+      if (control.logosWasmHost) {
+        log('serving; wasm ' + WASM_BYTES + ' bytes, cold instantiate '
+            + control.readyMs.toFixed(1) + ' ms, protocol ' + control.protocol);
+      } else if (control.logosWasmError) {
+        console.error('[logos-wasm ' + MODULE + '] the image failed to instantiate: '
+                      + control.logosWasmError);
+      } else {
+        log(control.logosWasmLog);
+      }
+      return;
+    }
+
+    channel.send(text);
+  };
+
+  // A WASM TRAP IS A MODULE FAILURE, NOT A PAGE CRASH -- and this is the line
+  // that makes the difference visible. A Rust panic inside the image aborts the
+  // wasm instance; the Worker's `error` event fires, this page is untouched, and
+  // the container learns the module is gone the same way it learns a page died:
+  // the channel goes quiet and its next introspection round trip times out.
+  //
+  // Closing the channel is deliberate rather than letting it time out: it tells
+  // the container NOW, and the supervision policy that restarts a Failed module
+  // reloads this page, which spawns a fresh Worker with a fresh image. The image
+  // has no state outside its own linear memory, so a restart is a clean one.
+  worker.onerror = (event) => {
+    console.error('[logos-wasm ' + MODULE + '] the image trapped: '
+                  + (event.message || 'unknown'));
+    try { channel.close(); } catch (e) { /* already gone */ }
+  };
+})();
+</script>
+</body>
+</html>

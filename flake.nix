@@ -201,9 +201,18 @@
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
 
+      # logos-nix's native overlays, exactly as lib/common.nix's mkPkgs applies
+      # them. The two used to disagree -- a module built through mkLogosModule
+      # got the overlays and this flake's own checks did not -- which was
+      # invisible while every overlay only patched a fetcher, and stops being so
+      # the moment one ADDS an attribute: checks.<sys>.web-variant reads
+      # pkgs.logosEmscriptenLlvm, which only exists on an overlaid set.
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         inherit system;
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = logos-nix.lib.nativeOverlays or [ ];
+        };
       });
 
       # Import the library functions
@@ -346,6 +355,16 @@
         # universal C++ leaf, a universal C++ module with a dependency, and a
         # codegen.rust module. Each build runs the gate as its installCheck.
         bare-modules = import ./tests/test-bare-modules.nix {
+          inherit pkgs;
+          mkLogosModule = lib.mkLogosModule;
+          fixturesRoot = ./tests/fixtures;
+        };
+        # Integration test: the `web` output — the same universal C++ leaf
+        # compiled to wasm32 and linked WITH the protocol, wrapped in an LGX
+        # `web` variant with its loader page. The build gates its own bytes;
+        # this checks what it cannot see from inside (the image is a HOST, and
+        # the three JS/HTML files name each other correctly).
+        web-variant = import ./tests/test-web-variant.nix {
           inherit pkgs;
           mkLogosModule = lib.mkLogosModule;
           fixturesRoot = ./tests/fixtures;
