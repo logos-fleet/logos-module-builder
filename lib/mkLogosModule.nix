@@ -2,7 +2,7 @@
 # This is the main entry point for building Logos modules.
 # Plugin compilation and header generation are delegated to a backend selected
 # by metadata.json "type": core modules use coreBackend, UI modules use uiBackend.
-{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, buildBareModule, moduleImplAbiFor, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
+{ nixpkgs, lib, common, parseMetadata, builderRoot, uiBackend, coreBackend, buildBareModule, buildWebModule, moduleImplAbiFor, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, logos-test-framework, logos-rust-sdk ? null, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app, rust-overlay ? null }:
 
 {
   # Required: Path to the module source
@@ -893,6 +893,34 @@ let
         extraBuildInputs = extraBuildInputs ++ runtimePkgs;
       };
 
+      # ── the `web` variant ─────────────────────────────────────────────────
+      # `nix build .#web`: the SAME sources as `bare`, compiled to wasm32 and
+      # linked WITH logos-protocol's web transport into a host that runs in a Web
+      # Worker, wrapped in an LGX `web` variant directory with its loader page.
+      #
+      # The Bare artifact and this one are the two ends of one idea: a module
+      # with no Qt in it and no protocol linked can be given ANY host. On a phone
+      # the host is the app's own image and the module is dlopened; in a webview
+      # there is no dlopen and no host to dlopen into, so the host is compiled
+      # into the same image. Cut from the same `moduleGenerate`, so a `web`
+      # variant and a Bare artifact are the same module by construction.
+      #
+      # Null, and the output absent, when the protocol input publishes no wasm
+      # subset. That is a real state during a pin rollout and it must not be an
+      # eval error in every consumer: a module whose protocol pin predates
+      # nix/wasm.nix simply has no `web` output yet.
+      logosProtocolWasmPkg =
+        (logos-protocol.packages.${system} or {}).logos-protocol-wasm or null;
+
+      webVariant =
+        if logosProtocolWasmPkg == null then null
+        else buildWebModule {
+          inherit pkgs config builderRoot logosSdk;
+          inherit extraNativeBuildInputs extraBuildInputs;
+          generatedSrc = moduleGenerate;
+          logosProtocolWasm = logosProtocolWasmPkg;
+        };
+
       # Two header variants per module — Qt-typed and lp (Qt-free,
       # logos-protocol C ABI). Each is its own Nix derivation, so a
       # downstream module only realises the one its `--api-style` actually
@@ -1043,6 +1071,13 @@ let
       # scripts/logos-bare-gate.sh (protocol-free or no derivation).
       bare = bareLib;
       "${config.name}-bare" = bareLib;
+    } // lib.optionalAttrs (config.packaged_as_cdylib && webVariant != null) {
+      # The `web` variant: the Wasm host and its loader page, laid out as an LGX
+      # variant directory. Same admission rule as `bare` — a ui_qml view backend
+      # or a `legacy` module has no protocol-free form to compile, so it gets no
+      # `web` output either.
+      web = webVariant;
+      "${config.name}-web" = webVariant;
     } // lib.optionalAttrs (moduleLibPortable != null) {
       "${config.name}-lib-portable" = moduleLibPortable;
       lib-portable = moduleLibPortable;

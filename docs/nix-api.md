@@ -220,6 +220,8 @@ Returns an attribute set with:
       # Only for `interface: "cdylib"` and core `interface: "universal"` modules:
       bare = <Bare module artifact>;          # also under packages.aarch64-ios,
       <name>-bare = <Bare module artifact>;   # .aarch64-ios-simulator, .aarch64-android
+      web  = <`web` LGX variant: Wasm host + loader page>;
+      <name>-web = <the same>;
 
       # Only when externalLibInputs uses structured format with variants:
       <name>-lib-portable = <portable library package>;
@@ -398,6 +400,58 @@ reason). Two names are allowed explicitly — `libc++_shared.so`, because Qt's
 Android platform refuses any other STL and the Native container's APK therefore
 packages it, and `liblogos_protocol.so`, the empty host-ABI stub's soname the
 host image supplies.
+
+### The `web` output — the Wasm host and its loader page
+
+```bash
+nix build .#web
+```
+
+The same sources as `bare`, compiled to wasm32 by the pinned Emscripten
+(logos-nix's `nix/wasm/overlay.nix`) and linked **with** logos-protocol's web
+transport into one image that runs in a Web Worker. The output is an LGX `web`
+variant directory:
+
+```
+<name>_web/
+  manifest.json          the module's metadata, main = index.html
+  index.html             the loader page: spawns the Worker and relays frames
+  logos-wasm-worker.js   the Worker: emscripten glue in, message port out
+  <name>_wasm.js         THE WASM HOST (the image base64-embedded)
+  <name>_wasm_image.wasm the image on its own, for weighing and inspection
+  wasm-host.json         what the build measured: wasm/glue sizes, entry names
+```
+
+**The Bare artifact and this one are the two ends of one idea.** A module with
+no Qt in it and no protocol linked can be given any host. On a phone the host is
+the app's own image and the module is `dlopen`ed, so the Bare artifact leaves
+`lp_*` undefined for the host to supply. In a webview there is no `dlopen` and
+no host to dlopen *into* — the App Store's rule (ADR 0003) is why the web
+variant exists at all — so the host is compiled into the same image and the
+module and the protocol are one link.
+
+Admission is the same as `bare`'s: `interface: "cdylib"` and core
+`interface: "universal"` modules only. A `ui_qml` view backend or a `legacy`
+module is a Qt plugin object holding a `LogosAPI` and has no protocol-free form
+to compile.
+
+The container is unchanged and is not wasm-aware. It opens `main` in a webview
+and relays the web transport across its bridge; the page relays that to the
+Worker's port. That is why the same variant runs behind a `WKWebView` on a
+phone.
+
+`<name>_wasm.js` is built with `-sSINGLE_FILE=1`, which is not a size
+preference: a `file://` page cannot `fetch()` a sibling `.wasm`, and a webview
+loading a local entry document is exactly where this runs.
+`<name>_wasm_image.wasm` is extracted back out of that glue rather than linked a
+second time — `wasm-opt` minifies export names per link, so a separately-linked
+image would not match the shipped glue.
+
+`checks.<system>.web-variant` drives a built image from node — the host's
+message port has a `Module.logosOut` fallback for exactly this — and asserts
+`add(1, 2)` is 3 through the real JSON envelope, codec, peer and provider, that
+the door shuts once a token arrives, and that a second image sees neither the
+first one's tokens nor its state.
 
 ### The `view` output — a `ui_qml` module as an iOS framework
 
