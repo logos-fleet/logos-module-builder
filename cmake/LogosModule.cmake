@@ -289,7 +289,16 @@ function(_logos_find_external_lib ext_lib out_lib out_include out_lib_dir)
         set(_names lib${ext_lib}.so lib${ext_lib}.dylib ${ext_lib}.so ${ext_lib}.dylib lib${ext_lib}.a ${ext_lib}.a)
     endif()
     # Find the library (prefer shared, fall back to static).
-    find_library(${ext_lib}_PATH NAMES ${_names} PATHS ${_lib_dir} NO_DEFAULT_PATH)
+    #
+    # NO_CMAKE_FIND_ROOT_PATH: the staging directory is in the SOURCE TREE, not
+    # in a sysroot. Under a cross build CMake re-roots find_library at
+    # CMAKE_FIND_ROOT_PATH -- an iOS toolchain sets that to the SDK -- so the
+    # absolute path named in PATHS is silently rewritten to <sdk>/nix/store/...
+    # and nothing is found. NO_DEFAULT_PATH does not turn re-rooting off; only
+    # this does. Same trap, and the same fix, as the Rust/Go archive lookup in
+    # logos_bare_module().
+    find_library(${ext_lib}_PATH NAMES ${_names}
+        PATHS ${_lib_dir} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 
     set(${out_lib} "${${ext_lib}_PATH}" PARENT_SCOPE)
     set(${out_include} "${_include_dir}" PARENT_SCOPE)

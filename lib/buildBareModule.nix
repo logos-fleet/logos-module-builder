@@ -50,6 +50,16 @@
   # Rust/Go archive. A mobile caller passes the target's archive here; a native
   # one passes nothing and keeps what generate staged.
   stagedArchives ? [],
+  # `nix.external_libraries`, built FOR this target. Same problem as
+  # stagedArchives and a different shape of answer: `generate` staged a
+  # build-platform image of each one into lib/, and no amount of re-running the
+  # generators would change that -- an external library comes from its OWN
+  # flake. A mobile caller resolves the target's build of it (the module's
+  # flake publishes one, see mkLogosModule's `mobilePackages`) and passes
+  # `{ name; drv; }` here; the build-platform image is DELETED before the
+  # target's lands, because _logos_find_external_lib prefers a shared library
+  # over a static one and would otherwise keep linking the one for the Mac.
+  stagedExternalLibs ? [],
   extraNativeBuildInputs ? [],
   extraBuildInputs ? [],
   # Gating that runs after the Bare gate, over the same artifact. Android
@@ -247,9 +257,19 @@ in mkDerivation ({
   # Before cmake, and by overwrite rather than by flag: LogosModule.cmake
   # resolves each rustStaticNames entry to lib/lib<name>.a inside the source
   # tree, so the cross archive has to arrive under the name generate used.
-  postPatch = lib.optionalString (stagedArchives != []) ''
+  postPatch = lib.optionalString (stagedArchives != [] || stagedExternalLibs != []) ''
     mkdir -p lib
     ${lib.concatMapStringsSep "\n" (a: ''cp -f "${a}" lib/'') stagedArchives}
+    ${lib.concatMapStringsSep "\n" (e: ''
+      # Only the LIBRARY images go; the headers `generate` staged beside them
+      # are source and are right for every target.
+      for _ext in so dylib dll a lib; do
+        rm -f "lib/lib${e.name}.$_ext" "lib/${e.name}.$_ext"
+      done
+      cp -fL ${e.drv}/lib/* lib/
+      if [ -d ${e.drv}/include ]; then cp -fL ${e.drv}/include/* lib/; fi
+      chmod -R u+w lib
+    '') stagedExternalLibs}
   '';
 
   cmakeFlags = [
