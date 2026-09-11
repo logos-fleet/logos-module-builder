@@ -488,6 +488,14 @@ evaluated for the *target* platform, so an unused package can break a cross
 build even though it is harmless natively — a package whose closure is not
 available for the target makes the whole module fail to evaluate.
 
+Both lists reach the mobile `bare` artifact as well: each prefix goes on
+`CMAKE_PREFIX_PATH` and `CMAKE_FIND_ROOT_PATH` (so `nix.cmake.find_packages`
+resolves against the *target's* build of the package), and on iOS also on the
+compile line as a system include directory. That last part is not redundant —
+the iOS toolchain is `stdenvNoCC` driving Xcode's clang, so there is no
+cc-wrapper to turn a `buildInput` into `-isystem <prefix>/include` the way a
+native build does.
+
 Package names can be dotted for nested packages:
 
 ```json
