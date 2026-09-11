@@ -53,7 +53,12 @@ let
 
   stem = "${config.name}_view";
 
+  # The device and the simulator share a triple; `darwinPlatform` is what
+  # separates them. Derived here rather than read off `pkgs.logosIosAppleSdk`
+  # for the same reason buildBareModule derives it: that attribute is newer
+  # than some consumers' logos-nix pin, and this is one line of the same fact.
   isIosSimulator = isIos && host.darwinPlatform == "ios-simulator";
+  appleSdk = if isIosSimulator then "iphonesimulator" else "iphoneos";
   iosPlatformName = if isIosSimulator then "iPhoneSimulator" else "iPhoneOS";
   # Matches logos-nix's iosDeploymentTarget, the floor every hand-rolled iOS
   # artifact in this stack targets.
@@ -135,11 +140,11 @@ pkgs.xcodeClang.mkDerivation {
   # in rather than replaced — it exports CC/CXX from xcrun, without which cmake
   # reports "CMAKE_CXX_COMPILER not set".
   preConfigure = ''
-    export CC=$(xcrun --sdk ${pkgs.logosIosAppleSdk} --find clang)
-    export CXX=$(xcrun --sdk ${pkgs.logosIosAppleSdk} --find clang++)
-    export AR=$(xcrun --sdk ${pkgs.logosIosAppleSdk} --find ar)
-    export RANLIB=$(xcrun --sdk ${pkgs.logosIosAppleSdk} --find ranlib)
-    export STRIP=$(xcrun --sdk ${pkgs.logosIosAppleSdk} --find strip)
+    export CC=$(xcrun --sdk ${appleSdk} --find clang)
+    export CXX=$(xcrun --sdk ${appleSdk} --find clang++)
+    export AR=$(xcrun --sdk ${appleSdk} --find ar)
+    export RANLIB=$(xcrun --sdk ${appleSdk} --find ranlib)
+    export STRIP=$(xcrun --sdk ${appleSdk} --find strip)
     cmakeFlagsArray+=(-DCMAKE_SYSTEM_NAME=iOS)
     qmldir="$PWD/${qmlDir}"
     [ -d "$qmldir" ] || { echo "no QML directory at $qmldir (metadata.json view: ${qmlEntry})" >&2; exit 1; }
