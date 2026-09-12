@@ -44,13 +44,6 @@ const RUNTIME_GLUE = 'logos_qml_runtime.js';
 const RUNTIME_ENTRY = 'logos_qml_runtime_entry';
 const QT_LOADER = 'qtloader.js';
 
-// THE PACKAGE'S OWN COPY of Qt's loader, which the HEADLESS document uses.
-// Same file, different directory, and the difference is the point: a module
-// keeping its Wasm host alive with its UI evicted must not touch the app's QML
-// runtime directory at all, or "the runtime is gone" would be a lie the first
-// time a container served the two from different places.
-const LOCAL_QT_LOADER = 'qtloader.js';
-
 // The runtime's own name for its half of the wire, and this image's for its
 // half. A port name is PROCESS-LOCAL — it is what a process calls a port it was
 // handed, never a rendezvous — so the two ends name their own halves and are
@@ -189,12 +182,18 @@ export async function startLogosWebView(config) {
 //   module        the module's name, as the core knows it
 //   backendGlue   the backend image's emscripten glue
 //   backendEntry  that glue's -sEXPORT_NAME
-//   qtLoader      Qt's loader, from THIS package (see LOCAL_QT_LOADER)
+//   qtLoader      Qt's loader, from THIS package -- see below
 //   channelReady  a Promise of the container's five-method channel, or null
 //
 // Resolves with the image, or rejects naming the step that failed.
 export async function startLogosWebHost(config) {
-  await loadScript(config.qtLoader || LOCAL_QT_LOADER);
+  // THE PACKAGE'S OWN COPY of Qt's loader: resolved against this document, NOT
+  // against the app's runtime directory the way startLogosWebView resolves it.
+  // Same file, different place, and the difference is the point -- a module
+  // keeping its Wasm host alive with its UI evicted must not touch that
+  // directory at all, or "the runtime is gone" would be a lie the first time a
+  // container served the two from different places.
+  await loadScript(config.qtLoader || QT_LOADER);
   await loadScript(config.backendGlue);
 
   if (typeof qtLoad !== 'function')
