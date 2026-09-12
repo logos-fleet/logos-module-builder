@@ -61,6 +61,18 @@ function loadScript(url) {
   });
 }
 
+// THE CONTAINER'S WIRE, bound to a backend image. Both entry documents do
+// exactly this and nothing else with it: the frames are logos-protocol's, the
+// far end is the core, and the image's call router is what turns them into
+// answers. A page with no container — a developer serving the variant by hand —
+// simply has no route out, and the calls that would have taken it say so.
+async function bindContainerChannel(backend, channelReady) {
+  if (!channelReady) return;
+  const hostChannel = await channelReady;
+  hostChannel.setReceiver((text) => backend.logosViewHostDeliver(text));
+  backend.logosViewHostSetSink((text) => hostChannel.send(text));
+}
+
 // Bring up one `ui_qml` module's web variant in this page.
 //
 // `config` is what the build stamped into the page plus whatever the container
@@ -122,11 +134,7 @@ export async function startLogosWebView(config) {
   // Component.onCompleted is not racing the bridge. A page with no container —
   // a developer serving the variant by hand — still renders; only the calls to
   // other modules fail, and they say so.
-  if (config.channelReady) {
-    const hostChannel = await config.channelReady;
-    hostChannel.setReceiver((text) => backend.logosViewHostDeliver(text));
-    backend.logosViewHostSetSink((text) => hostChannel.send(text));
-  }
+  await bindContainerChannel(backend, config.channelReady);
 
   // THE MODULE'S QML, AS TEXT. Qt's network layer refuses the custom schemes
   // that replace `file://` in a webview, so the page fetches the document and
@@ -141,4 +149,57 @@ export async function startLogosWebView(config) {
     throw new Error(config.module + ': ' + runtime.logosRuntimeLastError());
 
   return { module: config.module, runtime, backend };
+}
+
+// ── the headless half ──────────────────────────────────────────────────────
+
+// THE SAME MODULE WITH NO UI: its Wasm host, alone in a page.
+//
+// WHY A `ui_qml` VARIANT SHIPS A SECOND ENTRY DOCUMENT. A phone container can
+// afford one QML runtime at a time (logos-basecamp's live-runtime budget), so a
+// module the user has navigated away from has to give its UI page up. A module
+// is not only its UI: a background module still answers its consumers, and slice
+// 28 asks for exactly that. Everything expensive is in the runtime — the ~26 MB
+// image, the scene, the GL context — and none of it is in here, so a container
+// that swaps a module's page from `index.html` to this one keeps the module
+// serving at a few MB.
+//
+// WHAT IS NOT IN THIS PAGE, and the list is the whole design:
+//
+//   * no QML runtime: it is neither loaded nor located, and this document
+//     never names the app's runtime directory;
+//   * no MessageChannel: there is no runtime for the backend to be paired
+//     with, so nothing adopts a port and the `.rep` source has no replica;
+//   * no container element: a QCoreApplication has no scene.
+//
+// What IS here is the container's channel, which is the module's entire
+// contract with the core — Call, Methods, Subscribe, Token — so a call made
+// while the module is in the background is answered by the same router that
+// answers one made while it is on screen.
+//
+// `config` is what the build stamped into the headless page:
+//
+//   module        the module's name, as the core knows it
+//   backendGlue   the backend image's emscripten glue
+//   backendEntry  that glue's -sEXPORT_NAME
+//   qtLoader      Qt's loader, from THIS package -- see below
+//   channelReady  a Promise of the container's five-method channel, or null
+//
+// Resolves with the image, or rejects naming the step that failed.
+export async function startLogosWebHost(config) {
+  // THE PACKAGE'S OWN COPY of Qt's loader: resolved against this document, NOT
+  // against the app's runtime directory the way startLogosWebView resolves it.
+  // Same file, different place, and the difference is the point -- a module
+  // keeping its Wasm host alive with its UI evicted must not touch that
+  // directory at all, or "the runtime is gone" would be a lie the first time a
+  // container served the two from different places.
+  await loadScript(config.qtLoader || QT_LOADER);
+  await loadScript(config.backendGlue);
+
+  if (typeof qtLoad !== 'function')
+    throw new Error('qtloader.js did not define qtLoad');
+
+  const backend = await qtLoad({ qt: { entryFunction: window[config.backendEntry] } });
+  await bindContainerChannel(backend, config.channelReady);
+  return { module: config.module, backend };
 }

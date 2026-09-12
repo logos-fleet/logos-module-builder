@@ -21,8 +21,14 @@ import Logos.Controls
 //     inside the Web container leaves the page entirely: the runtime remotes it
 //     to this module's wasm host, which makes a real logos-protocol call.
 //
+// AND A TEXT FIELD AND A LIST, which slice 28 asks for. A `web` variant's
+// keyboard input and list scrolling cannot be shown against a view that has
+// neither, and this is the only `web` variant in existence -- so the two
+// controls live here, report what reached them, and every container's check
+// drives the same document.
+//
 // The console lines are the browser end-to-end check's only window into a
-// canvas — see wasm/browser-e2e/run.mjs.
+// canvas -- see wasm/browser-e2e/run.mjs.
 Rectangle {
     id: root
 
@@ -79,6 +85,78 @@ Rectangle {
             Layout.alignment: Qt.AlignHCenter
             text: root.callResult
         }
+
+        // WHAT A KEY EVENT LANDS IN. A container drives a real DOM key event at
+        // the page; what it can then read is this, because a canvas has no DOM
+        // node holding the text. Reported on every change rather than on
+        // editingFinished: the interesting failure is a key that arrived and
+        // produced the WRONG character, which a final-value check would hide.
+        LogosTextField {
+            id: field
+            objectName: "field"
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 220
+            placeholderText: qsTr("type here")
+            onTextChanged: console.log("logos-view: typed " + field.text)
+        }
+
+        // THE FOCUS, SAID OUT LOUD, and it is the EDITOR's rather than the
+        // field's: `activeFocus` is true only of the item that actually holds
+        // it, and what holds it inside a LogosTextField is the TextInput.
+        // Watched from outside rather than declared on the field, because a
+        // handler written there would replace the one LogosTextField itself
+        // uses to hand focus on to that editor.
+        //
+        // Worth a line of its own: a key event that reaches Qt and lands on
+        // nothing looks exactly like one that never arrived, and the two have
+        // different causes.
+        Connections {
+            target: field.textInput
+            function onActiveFocusChanged() {
+                console.log("logos-view: field-focus " + field.textInput.activeFocus)
+            }
+        }
+
+        // WHAT A SCROLL GESTURE MOVES. Longer than its viewport by design -- a
+        // list that fits cannot be scrolled, and a check that drove one would
+        // pass against a frozen view.
+        LogosListView {
+            id: list
+            objectName: "list"
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 220
+            Layout.preferredHeight: 120
+            model: 60
+            delegate: LogosText {
+                required property int index
+                width: ListView.view ? ListView.view.width : 0
+                text: "row " + index
+            }
+            // contentY, AND the row it puts at the top. The offset alone would
+            // be satisfied by a list that moved its content without rebinding a
+            // delegate, and what a user calls scrolling is the row changing.
+            onContentYChanged: console.log("logos-view: scrolled contentY="
+                                           + Math.round(list.contentY)
+                                           + " first=" + list.indexAt(2, list.contentY + 2))
+        }
+    }
+
+    // Where the things a test must aim at ARE, in window coordinates. Qt draws
+    // into a canvas and a test has no DOM to query; this is the only honest way
+    // to put a pointer or a key on what a user would touch.
+    Timer {
+        interval: 250
+        running: true
+        repeat: true
+        onTriggered: {
+            var report = function (label, item) {
+                var p = item.mapToItem(null, item.width / 2, item.height / 2)
+                console.log("logos-view: " + label + " " + Math.round(p.x) + " " + Math.round(p.y))
+            }
+            report("button-at", incrementButton)
+            report("field-at", field)
+            report("list-at", list)
+        }
     }
 
     // A call to ANOTHER module, made from the view. Driven by a timer rather
@@ -92,20 +170,5 @@ Rectangle {
             root.callResult = payload
             console.log("logos-view: callModuleAsync -> " + payload)
         }, 5000)
-    }
-
-    // Where the button is, in window coordinates, so a browser test can put a
-    // real pointer event on it. Qt draws into a canvas and a test has no DOM to
-    // query; this is the only honest way to click what a user would click.
-    Timer {
-        interval: 250
-        running: true
-        repeat: true
-        onTriggered: {
-            var p = incrementButton.mapToItem(null,
-                                              incrementButton.width / 2,
-                                              incrementButton.height / 2)
-            console.log("logos-view: button-at " + Math.round(p.x) + " " + Math.round(p.y))
-        }
     }
 }
