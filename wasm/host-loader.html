@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <title>@MODULE@ (host)</title>
+</head>
+<body>
+<!--
+  THE HEADLESS ENTRY DOCUMENT of a `ui_qml` module's `web` variant — the same
+  module with its UI given up (ADR 0004, slice 28).
+
+  A `web` variant has TWO entry documents and a container chooses between them:
+
+      index.html   the QML runtime + this module's view + this module's Wasm
+                   host. What the user is looking at. ~26 MB of runtime.
+      host.html    this module's Wasm host and nothing else. What a module in
+                   the BACKGROUND is. A few MB.
+
+  A phone container can afford one QML runtime at a time, so a module the user
+  has navigated away from is swapped onto this document: its page stops costing
+  a runtime and its module keeps answering calls, because the container's
+  channel — the module's whole contract with the core — is bound here exactly as
+  it is over there.
+
+  THE APP'S RUNTIME DIRECTORY IS NOT NAMED IN THIS FILE, and the build checks
+  that rather than leaving it to the eye (buildWebViewModule's installCheckPhase
+  greps this document for the four names that would mean it had been reached
+  for). A headless page that loaded the runtime would be a background module
+  paying for a scene it does not draw.
+
+  What the container may set before this runs:
+
+    window.logosChannelReady   a Promise of the container's channel, the same
+                               seam the UI document and a Bare variant use
+
+  What it publishes:
+
+    window.logosWebHostReady   a Promise of { module, backend }, or a rejection
+                               naming the step that failed.
+-->
+<script type="module">
+import { startLogosWebHost } from './logos-view-loader.js';
+
+window.logosWebHostReady = startLogosWebHost({
+  module: '@MODULE@',
+  backendGlue: '@BACKEND_JS@',
+  backendEntry: '@BACKEND_ENTRY@',
+  qtLoader: '@QT_LOADER@',
+  channelReady: window.logosChannelReady || null,
+});
+
+window.logosWebHostReady.then((state) => {
+  // THE LINE A CONTAINER WAITS FOR. A headless page draws nothing, so there is
+  // no first paint and no geometry to observe: what says the Wasm host is up is
+  // the host saying so.
+  console.log('[logos-web-host @MODULE@] serving with no UI; cold instantiate '
+              + state.backend.logosViewHostReadyMs().toFixed(1) + ' ms');
+}).catch((e) => {
+  console.error('[logos-web-host @MODULE@] did not start: ' + ((e && e.message) || e));
+});
+</script>
+</body>
+</html>

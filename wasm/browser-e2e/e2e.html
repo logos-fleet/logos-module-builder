@@ -96,6 +96,77 @@ function clickAt(x, y) {
   return '';
 }
 
+// WHERE A KEY EVENT HAS TO GO. Qt for WebAssembly does not read keys off the
+// canvas when a text input has focus: QWasmInputContext focuses a hidden
+// <input> and listens there, so that a phone raises its soft keyboard and an
+// IME has something to compose into. The DEEPEST active element -- through
+// however many shadow roots Qt has put between the document and it -- is
+// therefore the only target that works for both, and it is what a real
+// keystroke would have reached anyway.
+function deepActiveElement() {
+  let node = document.activeElement;
+  while (node && node.shadowRoot && node.shadowRoot.activeElement)
+    node = node.shadowRoot.activeElement;
+  return node;
+}
+
+// One character, as the browser would have delivered it.
+//
+// THE KEY EVENT AND NOTHING ELSE. Qt takes the character off `keydown` itself
+// -- MEASURED: adding the `input` event a real IME would also fire types every
+// character twice, because both paths are live and Qt follows both.
+function pressKey(key) {
+  const target = deepActiveElement() || document.body;
+  const init = {
+    key, code: key.length === 1 ? 'Key' + key.toUpperCase() : key,
+    bubbles: true, cancelable: true, composed: true,
+  };
+  target.dispatchEvent(new KeyboardEvent('keydown', init));
+  target.dispatchEvent(new KeyboardEvent('keyup', init));
+  return target.tagName + (target.id ? '#' + target.id : '');
+}
+
+// A FLICK, not a wheel. A phone has no wheel and the container this stands in
+// for is a phone's; what a finger does to a list is a pointer press, a few
+// moves and a release, and Qt turns exactly that into the drag QQuickFlickable
+// follows. Returns the element it drove, for a check that finds nothing to say
+// so.
+async function dragAt(x, y, dy) {
+  const host = document.querySelector('#qt-shadow-container');
+  const root = (host && host.shadowRoot) || document;
+  const canvas = root.querySelector('canvas');
+  if (!canvas) return 'no canvas in the Qt shadow root';
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + x;
+  const at = (offset) => ({
+    bubbles: true, cancelable: true, composed: true,
+    clientX: cx, clientY: rect.top + y + offset, screenX: cx, screenY: rect.top + y + offset,
+    pointerId: 2, pointerType: 'touch', isPrimary: true, width: 8, height: 8, pressure: 0.5,
+  });
+  const target = (root.elementFromPoint ? root.elementFromPoint(cx, rect.top + y) : null) || canvas;
+  // POINTER CAPTURE, DEFUSED. Qt captures the pointer on pointerdown, and the
+  // browser refuses to capture an id that belongs to no real input device --
+  // which throws out of the dispatch and leaves the drag half-delivered.
+  if (!Element.prototype.__logosCaptureStubbed) {
+    Element.prototype.setPointerCapture = function () {};
+    Element.prototype.releasePointerCapture = function () {};
+    Element.prototype.__logosCaptureStubbed = true;
+  }
+  target.dispatchEvent(new PointerEvent('pointerdown', Object.assign(at(0), { button: 0, buttons: 1 })));
+  // SEVERAL MOVES. One jump is a teleport: Flickable starts following only
+  // after the drag threshold, and it needs more than one sample to have a
+  // velocity at all.
+  for (let i = 1; i <= 8; i++) {
+    await sleep(16);
+    target.dispatchEvent(new PointerEvent('pointermove',
+      Object.assign(at((dy * i) / 8), { button: -1, buttons: 1 })));
+  }
+  await sleep(16);
+  target.dispatchEvent(new PointerEvent('pointerup',
+    Object.assign(at(dy), { button: 0, buttons: 0, pressure: 0 })));
+  return '';
+}
+
 // THE ASSERTIONS THAT NEED THE MODULE'S COOPERATION, opted into explicitly.
 //
 // A view draws into a canvas: from outside it there is no DOM to query, no
@@ -199,6 +270,47 @@ async function main() {
               counted ? 'count=' + counted[1] : 'the view never saw the change');
       }
 
+      // ── a real key event types into the view's text field ────────────────
+      //
+      // Slice 28's first criterion, and the half a rendered view does not
+      // establish. The field is focused with the same pointer event the button
+      // took, and then five keys go in the way a browser delivers them.
+      const fieldAt = await waitFor(/logos-view: field-at (\d+) (\d+)/);
+      check('the view has a text field and it is laid out', fieldAt !== null,
+            fieldAt ? fieldAt[1] + ',' + fieldAt[2] : 'no field-at line');
+      if (fieldAt) {
+        const beforeFocus = logs.length;
+        clickAt(Number(fieldAt[1]), Number(fieldAt[2]));
+        const focused = await waitFor(/logos-view: field-focus (true|false)/, beforeFocus);
+        check('a pointer event gives the text field focus',
+              focused !== null && focused[1] === 'true',
+              focused ? focused[1] : 'the field never reported its focus');
+
+        const beforeKeys = logs.length;
+        let where = '';
+        for (const key of 'logos') where = pressKey(key);
+        const typed = await waitFor(/logos-view: typed (\S+)/, beforeKeys);
+        check('keyboard input reaches the view\'s text field',
+              typed !== null && typed[1] === 'logos',
+              (typed ? 'text=' + typed[1] : 'nothing was typed') + ', keys sent to ' + where);
+      }
+
+      // ── a drag scrolls the view's list ───────────────────────────────────
+      const listAt = await waitFor(/logos-view: list-at (\d+) (\d+)/);
+      check('the view has a list and it is laid out', listAt !== null,
+            listAt ? listAt[1] + ',' + listAt[2] : 'no list-at line');
+      if (listAt) {
+        const beforeDrag = logs.length;
+        const err = await dragAt(Number(listAt[1]), Number(listAt[2]), -90);
+        check('a drag reached the canvas', err === '', err);
+        const scrolled = await waitFor(/logos-view: scrolled contentY=(\d+) first=(\d+)/,
+                                       beforeDrag);
+        check('list scrolling works: the list moved and rebound its rows',
+              scrolled !== null && Number(scrolled[1]) > 0 && Number(scrolled[2]) > 0,
+              scrolled ? 'contentY=' + scrolled[1] + ' first row=' + scrolled[2]
+                       : 'the list never moved');
+      }
+
       // ── callModuleAsync left the page as a real protocol call ───────────
       const answered = await waitFor(/logos-view: callModuleAsync -> (.+)/);
       const calls = heard.filter((m) => m.type === CALL);
@@ -221,6 +333,43 @@ async function main() {
     const second = state.runtime.logosInstallModuleView('second_module', qml);
     check('a second module\'s QML installs into the same runtime',
           second === true, state.runtime.logosRuntimeLastError());
+
+    // ── the same module with no UI at all ────────────────────────────────
+    //
+    // Slice 28's third criterion, from the page's side: the variant's SECOND
+    // entry document brings the module's Wasm host up on its own, so a
+    // container that has evicted a module's UI can swap it onto this and keep
+    // it answering. In its own frame because that is what a container does --
+    // one document per page -- and because a host sharing this page's globals
+    // would prove nothing about a page that has none of them.
+    //
+    // AND THE RUNTIME COUNTER IS THE REAL ASSERTION. run.mjs refuses more than
+    // one request for the runtime image across the whole run; if this document
+    // pulled a runtime in, the count would be two and the check over there
+    // would fail. That is the only way to observe "it cost no runtime" from
+    // outside the page.
+    if (view.headless) {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:absolute;width:1px;height:1px;left:-10px;top:-10px';
+      frame.src = view.headless;
+      document.body.appendChild(frame);
+      let hostState = null;
+      let hostError = '';
+      try {
+        for (let i = 0; i < 600 && !frame.contentWindow.logosWebHostReady; i++)
+          await sleep(100);
+        hostState = await frame.contentWindow.logosWebHostReady;
+      } catch (e) { hostError = String((e && e.message) || e); }
+      check('the headless entry document brings the Wasm host up on its own',
+            hostState !== null && hostState.backend.logosViewHostServing() === true,
+            hostError || (hostState ? hostState.backend.logosViewHostModule() : 'never resolved'));
+      check('the headless host is the same module',
+            hostState !== null && hostState.backend.logosViewHostModule() === manifest.name,
+            hostState ? hostState.backend.logosViewHostModule() : '');
+    } else {
+      check('the manifest names a headless entry document', false,
+            'no logos_web_view.headless key');
+    }
 
     await sleep(1500);
     const failed = checks.filter((c) => !c.ok);

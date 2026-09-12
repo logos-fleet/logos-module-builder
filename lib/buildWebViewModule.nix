@@ -22,11 +22,22 @@
 #   <name>_web/
 #     manifest.json              main = index.html, logos_web_runtime = "qml"
 #     index.html                 the loader page (wasm/view-loader.html)
-#     logos-view-loader.js       what it runs (wasm/logos-view-loader.js)
+#     host.html                  the HEADLESS page (wasm/host-loader.html)
+#     logos-view-loader.js       what both run (wasm/logos-view-loader.js)
+#     qtloader.js                Qt's loader, for the headless page's sake
 #     view/<entry>.qml           the module's QML, as the page fetches it
 #     <name>_view_backend.js     the backend image's emscripten glue
 #     <name>_view_backend.wasm   the backend image
 #     web-view.json              what the build measured
+#
+# TWO ENTRY DOCUMENTS, ONE MODULE, and the second is slice 28's. `index.html`
+# is the module with its UI: the app's QML runtime, this module's view and this
+# module's Wasm host in one page. `host.html` is the same module with the UI
+# given up: the Wasm host alone, a few MB instead of ~26, still bound to the
+# container's channel and still answering calls. A container with a live-runtime
+# budget swaps a background module's page from the first to the second rather
+# than unloading it, which is what lets a module keep serving while the user is
+# somewhere else. The manifest names both.
 #
 # WHY THE BACKEND IMAGE IS NOT EMBEDDED IN ITS GLUE, where the Bare host's is:
 # -sSINGLE_FILE exists there to survive a `file://` page, and this page cannot
@@ -96,6 +107,12 @@ let
       qml = viewEntry;
       backend_glue = "${stem}.js";
       backend_entry = entryFunction;
+      # THE HEADLESS DOCUMENT, so a container can find it without knowing this
+      # builder's file names. Its absence is how an OLDER package says it has
+      # none: a container that finds no `headless` key has a variant that cannot
+      # survive an eviction, and the honest answer there is to unload the module
+      # rather than to guess at a file name.
+      headless = "host.html";
     };
   });
 
@@ -169,6 +186,18 @@ in pkgs.stdenv.mkDerivation {
       --replace-fail '@BACKEND_ENTRY@' '${entryFunction}' \
       --replace-fail '@BACKEND_WASM_BYTES@' "$wasm_bytes"
 
+    # QT'S LOADER, IN THE PACKAGE. The UI document takes it from the app's
+    # runtime directory, because it is loading that runtime's glue anyway. The
+    # headless document must not: a module whose UI has been evicted has to come
+    # up with the runtime directory out of reach, and a 30 KB copy is what buys
+    # that independence. Same Qt either way -- both are built against qtWasm.
+    cp ${webRuntimeWasm}/www/qtloader.js "$out_dir/qtloader.js"
+    substitute ${builderRoot}/wasm/host-loader.html "$out_dir/host.html" \
+      --replace-fail '@MODULE@' '${config.name}' \
+      --replace-fail '@BACKEND_JS@' '${stem}.js' \
+      --replace-fail '@BACKEND_ENTRY@' '${entryFunction}' \
+      --replace-fail '@QT_LOADER@' 'qtloader.js'
+
     cp ${manifestFile} "$out_dir/manifest.json"
 
     glue_bytes=$(wc -c < "$out_dir/${stem}.js" | tr -d ' ')
@@ -185,6 +214,7 @@ in pkgs.stdenv.mkDerivation {
 
     echo "logos-module-builder: ${config.name} ui_qml web variant"
     echo "  view backend image: raw $wasm_bytes B, brotli $br_bytes B (Qt ${qtWasm.version})"
+    echo "  two entry documents: index.html (runtime + view + host), host.html (host alone)"
     echo "  the ~26 MB QML runtime is NOT in here: it is the app's, downloaded once"
 
     runHook postInstall
@@ -238,21 +268,42 @@ in pkgs.stdenv.mkDerivation {
     # 4. THE PACKAGE IS COMPLETE AND THE PAGE IS FILLED IN. A substitution that
     #    silently did not fire leaves an @PLACEHOLDER@ in valid HTML, which is a
     #    dead module with no error anywhere.
-    for f in index.html manifest.json logos-view-loader.js web-view.json \
-             ${stem}.js ${viewEntry}; do
+    for f in index.html host.html qtloader.js manifest.json logos-view-loader.js \
+             web-view.json ${stem}.js ${viewEntry}; do
       test -s "$out_dir/$f" || { echo "$f is missing or empty"; exit 1; }
     done
 
-    if grep -q '@[A-Z_]\+@' "$out_dir/index.html"; then
-      echo "a template placeholder survived into the shipped page:"
-      grep -n '@[A-Z_]\+@' "$out_dir/index.html"
-      exit 1
-    fi
+    for page in index.html host.html; do
+      if grep -q '@[A-Z_]\+@' "$out_dir/$page"; then
+        echo "a template placeholder survived into the shipped $page:"
+        grep -n '@[A-Z_]\+@' "$out_dir/$page"
+        exit 1
+      fi
+    done
+
+    # 5. THE HEADLESS DOCUMENT COSTS NO RUNTIME. The whole of what it is for is
+    #    that a background module stops paying for the ~26 MB QML runtime, and
+    #    the way that claim dies is quietly: someone shares a line between the
+    #    two loaders, the headless page starts loading the runtime's glue, and
+    #    nothing anywhere fails. So the page is read: it may not name the
+    #    runtime's directory, its glue or its entry point.
+    for forbidden in logos-runtime logos_qml_runtime runtimeBase logosInstallModuleView; do
+      if grep -q "$forbidden" "$out_dir/host.html"; then
+        echo "the headless entry document names '$forbidden'. A module whose UI" >&2
+        echo "  has been evicted must come up with the app's QML runtime out of" >&2
+        echo "  reach -- that is the only reason this document exists." >&2
+        exit 1
+      fi
+    done
+    grep -q "backendGlue: '${stem}.js'" "$out_dir/host.html" \
+      || { echo "the headless page does not name the backend glue"; exit 1; }
 
     grep -q '"main": *"index.html"' "$out_dir/manifest.json" \
       || { echo "the manifest does not name index.html as its entry"; exit 1; }
     grep -q '"logos_web_runtime": *"qml"' "$out_dir/manifest.json" \
       || { echo "the manifest does not declare the qml web runtime"; exit 1; }
+    grep -q '"headless": *"host.html"' "$out_dir/manifest.json" \
+      || { echo "the manifest does not name the headless entry document"; exit 1; }
 
     runHook postInstallCheck
   '';

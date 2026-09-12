@@ -16,6 +16,9 @@
 #     it is NOT embedded in its glue — this page cannot be a file:// page in the
 #     first place, and a 4 MB image base64'd into JS costs a third again.
 #   * THE MODULE'S QML SHIPPED, at the path the manifest and the page agree on.
+#   * THE HEADLESS ENTRY DOCUMENT IS A SECOND DOCUMENT, imports the same loader,
+#     calls the headless entry point, and is named by the manifest — which is
+#     how a container finds it without knowing this builder's file names.
 #   * ADMISSION. A ui_qml module that declares no separable backend has no `web`
 #     output rather than a broken one, and a NON-ui_qml module that declares one
 #     is a metadata error rather than a silently ignored key.
@@ -56,12 +59,12 @@ in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
   variant=${counterWeb}/web_counter_web
   test -d "$variant" || { echo "FAIL: no web_counter_web/ directory in the output"; exit 1; }
 
-  for f in index.html manifest.json logos-view-loader.js web-view.json \
-           web_counter_view_backend.js web_counter_view_backend.wasm \
+  for f in index.html host.html qtloader.js manifest.json logos-view-loader.js \
+           web-view.json web_counter_view_backend.js web_counter_view_backend.wasm \
            view/Counter.qml; do
     test -s "$variant/$f" || { echo "FAIL: $f missing from the web variant"; exit 1; }
   done
-  echo "PASS: the variant carries the page, the loader, the backend image and the module's QML"
+  echo "PASS: the variant carries both pages, the loader, the backend image and the module's QML"
 
   # ── the four files agree ──────────────────────────────────────────────────
   grep -q "from './logos-view-loader.js'" "$variant/index.html" \
@@ -102,6 +105,36 @@ in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
     || { echo "FAIL: the page does not carry the measured image size"; exit 1; }
   brotli=$(sed -n 's/.*"brotliBytes":\([0-9]*\).*/\1/p' "$variant/web-view.json")
   echo "PASS: backend image $actual bytes raw, $brotli brotli, recorded in web-view.json and in the page"
+
+  # ── the headless entry document ───────────────────────────────────────────
+  #
+  # Slice 28's third criterion is that a Downloaded module's Wasm host keeps
+  # answering while its UI is evicted, and this is the artifact half of it: the
+  # variant ships a SECOND entry document that brings up the module's backend
+  # image with no QML runtime, so a container can swap a background module onto
+  # it instead of unloading the module.
+  #
+  # The build's own gate already refuses a headless page that names the app's
+  # runtime; what is added here is that the two pages are really different and
+  # that the manifest points a container at the right one.
+  grep -q "from './logos-view-loader.js'" "$variant/host.html" \
+    || { echo "FAIL: the headless page does not import the shipped loader"; exit 1; }
+  grep -q 'startLogosWebHost' "$variant/host.html" \
+    || { echo "FAIL: the headless page does not call the headless entry point"; exit 1; }
+  grep -q 'startLogosWebHost' "$variant/logos-view-loader.js" \
+    || { echo "FAIL: the shipped loader does not export startLogosWebHost"; exit 1; }
+  if grep -q 'logosInstallModuleView\|logos_qml_runtime' "$variant/host.html"; then
+    echo "FAIL: the headless page reaches for the QML runtime. A module whose UI"
+    echo "      has been evicted must come up without one -- that is the whole"
+    echo "      reason this document exists."
+    exit 1
+  fi
+  # ...and it is genuinely a second document rather than the same one twice.
+  cmp -s "$variant/index.html" "$variant/host.html" \
+    && { echo "FAIL: host.html and index.html are the same document"; exit 1; }
+  grep -q '"headless": *"host.html"' "$variant/manifest.json" \
+    || { echo "FAIL: the manifest does not name the headless entry document"; exit 1; }
+  echo "PASS: the variant ships a headless entry document, and the manifest names it"
 
   # ── the variant declares what kind of `web` it is ─────────────────────────
   grep -q '"logos_web_runtime": *"qml"' "$variant/manifest.json" \
