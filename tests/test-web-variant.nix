@@ -51,6 +51,13 @@ let
   # Same admission rule as `bare`: a Qt plugin object holding a LogosAPI has no
   # protocol-free form, so it cannot be compiled into a Wasm host either. Pure
   # evaluation — nothing is built.
+  #
+  # NOT "no ui_qml module has a `web` output" — since slice 27 one can, and it
+  # is a different artifact entirely (its QML plus a Qt-wasm view backend; see
+  # test-web-view-variant.nix). What both fixtures below assert is that neither
+  # gets THIS one, the Bare Wasm host, and the two admission rules cannot
+  # collide: `packaged_as_cdylib` is false for every ui_qml module, and
+  # `web.view_backend` is refused on everything that is not one.
   noWeb = label: fixture:
     let m = mkLogosModule {
           src = fixturesRoot + "/${fixture}";
@@ -62,7 +69,7 @@ let
 
   qtPluginsHaveNoWeb =
     noWeb "a hand-written Qt core module" "test-framework-module"
-    && noWeb "a ui_qml view backend" "qml-module";
+    && noWeb "a QML-only ui_qml module" "qml-module";
 
 in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   nativeBuildInputs = [ pkgs.nodejs ];

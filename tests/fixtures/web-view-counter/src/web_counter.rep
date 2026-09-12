@@ -1,0 +1,8 @@
+class WebCounter
+{
+    PROP(int count READONLY)
+    PROP(QString status READWRITE)
+
+    SLOT(void increment())
+    SLOT(int add(int a, int b))
+}

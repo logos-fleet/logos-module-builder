@@ -1,0 +1,33 @@
+{
+  "name": "web_counter",
+  "version": "1.0.0",
+  "type": "ui_qml",
+  "category": "test",
+  "description": "Fixture: a ui_qml counter whose backend is separable, so it has a `web` variant",
+  "main": "web_counter_plugin",
+  "view": "qml/Counter.qml",
+  "icon": null,
+  "dependencies": [],
+
+  "web": {
+    "view_backend": {
+      "class": "WebCounterBackend",
+      "header": "src/WebCounterBackend.h",
+      "sources": ["src/WebCounterBackend.cpp"]
+    }
+  },
+
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}

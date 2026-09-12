@@ -443,6 +443,55 @@ in
       # interface used to be the other consumer.
       codegen = raw.codegen or {};
 
+      # ── the `web` variant of a `type: ui_qml` module ──────────────────────
+      #
+      # `web.view_backend` is what makes a view module downloadable onto a Store
+      # shell (ADR 0003/0004): its QML goes into the app's bundled Qt-wasm QML
+      # runtime, and the C++ backend behind it is compiled into a wasm image of
+      # its own and remoted over QtRO on a MessagePort (slice 27).
+      #
+      #   "web": { "view_backend": {
+      #       "class":   "CounterBackend",
+      #       "header":  "src/CounterBackend.h",
+      #       "sources": ["src/CounterBackend.cpp"] } }
+      #
+      # DECLARED, NOT DERIVED, and that is the whole design of this key. A
+      # ui_qml module's `SOURCES` is its Qt PLUGIN — an object that inherits
+      # LogosViewPluginBase and holds a LogosAPI, neither of which exists in a
+      # wasm image — so the subset that is only the backend cannot be guessed
+      # from the file list. Modules whose backend is not separable from their
+      # plugin (the plugin IS the .rep source, which is a perfectly good desktop
+      # design) simply have no `web` output, which is better than one that fails
+      # to compile three layers down.
+      #
+      # null when absent, so this is additive: every existing ui_qml module is
+      # unchanged and gains no output.
+      web_view_backend =
+        let
+          declared = ((raw.web or {}).view_backend or null);
+          need = key:
+            let v = declared.${key} or null; in
+            if builtins.isString v && v != "" then v
+            else throw ("metadata.json: web.view_backend needs a non-empty string "
+                        + "'${key}' in module '${raw.name or "?"}'. It names the "
+                        + "QObject the module's Qt-wasm view backend hosts.");
+        in
+        if declared == null then null
+        else if !(builtins.isAttrs declared) then
+          throw ("metadata.json: web.view_backend must be an object in module "
+                 + "'${raw.name or "?"}', got: ${builtins.toJSON declared}")
+        else if type_ != "ui_qml" then
+          throw ("metadata.json: module '${raw.name or "?"}' declares "
+                 + "web.view_backend but is type '${type_}'. A view backend is "
+                 + "remoted to the bundled QML runtime as a .rep source, which "
+                 + "only a ui_qml module has; a headless module's `web` variant "
+                 + "is the Bare Wasm host and needs no declaration.")
+        else {
+          class = need "class";
+          header = need "header";
+          sources = safeList (declared.sources or []);
+        };
+
       # Names of external_libraries entries built with go_build (for CMake whole-archive link flags)
       go_static_lib_names = map (x: x.name) (lib.filter (x: x ? go_build && x.go_build == true)
         (safeList (nix.external_libraries or [])));

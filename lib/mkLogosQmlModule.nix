@@ -1,7 +1,7 @@
 # ui_qml module builder — QML view + optional C++ backend (process-isolated).
 # Calls buildCppPlugin only when config.main is set; the resulting `combined`
 # output bundles the plugin .so (when present) with the QML view directory.
-{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-module, uiBackend, coreBackend, builderRoot, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app }:
+{ nixpkgs, lib, common, parseMetadata, logos-cpp-sdk, logos-protocol ? null, logos-qt-sdk ? null, logos-plugin-qt ? null, logos-view-module, logos-view-module-runtime ? null, logos-module, uiBackend, coreBackend, builderRoot, buildWebViewModule, nix-bundle-lgx, nix-bundle-logos-module-install, logos-standalone-app }:
 
 {
   # Required: Path to the module source
@@ -304,6 +304,60 @@ let
     androidBuildSystem = common.defaultAndroidBuildSystem;
   };
 
+  # ── the `web` variant ───────────────────────────────────────────────────────
+  #
+  # `nix build .#web` on a view module: its QML, plus a Qt-for-WebAssembly image
+  # hosting its `.rep` backend over QtRO on a MessagePort, laid out as an LGX
+  # `web` variant for the app's bundled QML runtime to load (ADR 0004, slice 27).
+  # A ui_qml module's third artifact, beside the desktop plugin and the iOS view
+  # framework, and cut from the same `generate` tree as both.
+  #
+  # `view` is "qml/Counter.qml" — relative to the project root or to src/, and
+  # BOTH layouts are in use. Resolved against the source tree, exactly as the
+  # iOS view framework's is: `generate` snapshots the module's own tree, so the
+  # relative answer is the same there as here.
+  webViewQmlDir =
+    let rel = builtins.dirOf (config.view or ""); in
+    if config.view == null then null
+    else if builtins.pathExists "${src}/src/${rel}" then "src/${rel}"
+    else if builtins.pathExists "${src}/${rel}" then rel
+    else null;
+
+  # FIVE THINGS HAVE TO BE TRUE, and each absence is a real state rather than an
+  # error: the module has a C++ backend at all, it DECLARED one that is
+  # separable from its plugin (`web.view_backend` — see parseMetadata for why it
+  # cannot be derived), it has a `view` document, the pinned logos-nix publishes
+  # a Qt for WebAssembly, and the pinned logos-view-module-runtime publishes the
+  # wasm half this image links. Any missing means no `web` output on this
+  # module, which is what a pin rollout looks like from here.
+  webViewFor = system:
+    let
+      pkgs = pkgsFor system;
+      cfg = configFor system;
+      qtWasm = common.qtWasmFor system;
+      webRuntimeWasm =
+        if logos-view-module-runtime == null then null
+        else (logos-view-module-runtime.packages.${system} or {}).qml-runtime-wasm or null;
+      logosProtocolWasm =
+        if logos-protocol == null then null
+        else (logos-protocol.packages.${system} or {}).logos-protocol-wasm or null;
+    in
+    if !hasBackend
+       || cfg.web_view_backend == null
+       || webViewQmlDir == null
+       || qtWasm == null
+       || webRuntimeWasm == null
+       || logosProtocolWasm == null
+    then null
+    else buildWebViewModule {
+      inherit pkgs builderRoot qtWasm webRuntimeWasm logosProtocolWasm;
+      inherit extraNativeBuildInputs extraBuildInputs;
+      config = cfg;
+      generatedSrc = built.perSystem.${system}.moduleGenerate;
+      qmlDir = webViewQmlDir;
+      qmlEntry = builtins.baseNameOf cfg.view;
+    };
+
   # Package outputs
   packages = forAllSystems (system:
     let
@@ -318,6 +372,8 @@ let
         if moduleLibPortable != null
         then mkCombined system moduleLibPortable "-portable"
         else null;
+
+      webView = webViewFor system;
 
     in {
       # Default: lib/ layout for both backend and QML-only modules.
@@ -353,6 +409,14 @@ let
     } // lib.optionalAttrs (moduleLibPortable != null) {
       "${config.name}-lib-portable" = moduleLibPortable;
       lib-portable = moduleLibPortable;
+    } // lib.optionalAttrs (webView != null) {
+      # The same output NAME a headless module's Bare Wasm host gets from
+      # mkLogosModule, and they can never collide: the two builders are chosen
+      # by module type. One name because a container installing a `web` variant
+      # does not care which kind it is — the manifest's `logos_web_runtime`
+      # says.
+      web = webView;
+      "${config.name}-web" = webView;
     }
   );
 

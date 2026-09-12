@@ -1072,4 +1072,46 @@ in [
   (assertEq "_platform is the resolved triple"
     (at "x86_64-windows" { })._platform
     { os = "windows"; architecture = "x86_64"; abi = "gnu"; })
+
+  # --- web.view_backend: the ui_qml `web` variant (ADR 0004, slice 27) ---
+  #
+  # ABSENT IS THE DEFAULT AND MUST STAY CHEAP: every ui_qml module written
+  # before this key existed parses unchanged and gains no output.
+  (assertEq "web.view_backend is null when unset"
+    (parse ''{"name":"m","type":"ui_qml","view":"qml/Main.qml"}'').web_view_backend
+    null)
+
+  (assertEq "web.view_backend is parsed for a ui_qml module"
+    (parse ''{"name":"m","type":"ui_qml","view":"qml/Main.qml","web":{"view_backend":
+       {"class":"MBackend","header":"src/MBackend.h","sources":["src/MBackend.cpp"]}}}'').web_view_backend
+    { class = "MBackend"; header = "src/MBackend.h"; sources = [ "src/MBackend.cpp" ]; })
+
+  (assertEq "web.view_backend.sources defaults to empty"
+    (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","web":{"view_backend":
+       {"class":"B","header":"src/B.h"}}}'').web_view_backend.sources
+    [ ])
+
+  # A header-only backend is legal (the class may be defined inline), an unnamed
+  # one is not: the host compiles `new <class>` against `#include <header>`, so
+  # either missing is a compile error three layers down with no mention of the
+  # metadata that caused it.
+  (assertThrows "web.view_backend without a class is refused"
+    (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","web":{"view_backend":
+       {"header":"src/B.h"}}}'').web_view_backend)
+
+  (assertThrows "web.view_backend without a header is refused"
+    (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","web":{"view_backend":
+       {"class":"B"}}}'').web_view_backend)
+
+  # THE KEY BELONGS TO ui_qml AND NOTHING ELSE. A headless module's `web`
+  # variant is the Bare Wasm host, which needs no declaration; a `view_backend`
+  # on one would be a silently ignored key that its author believes did
+  # something.
+  (assertThrows "web.view_backend on a non-ui_qml module is refused"
+    (parse ''{"name":"m","type":"core","web":{"view_backend":
+       {"class":"B","header":"src/B.h"}}}'').web_view_backend)
+
+  (assertThrows "web.view_backend must be an object"
+    (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","web":{"view_backend":"B"}}'')
+      .web_view_backend)
 ]

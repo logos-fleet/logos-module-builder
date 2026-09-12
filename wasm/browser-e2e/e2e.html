@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <title>logos ui_qml web variant — browser end-to-end</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0d0e; }
+    #logos-view { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+<div id="logos-view"></div>
+<script type="module">
+// THE PAGE HALF of the browser end-to-end. See run.mjs for what this proves and
+// why it cannot be a nix check.
+//
+// It is the container's job, done in JavaScript: serve the runtime, stand in
+// for the core behind `window.logosChannelReady`, and start the variant with
+// the SHIPPED loader — imported below from the variant directory, not
+// reimplemented here, so what is asserted is what a container runs.
+
+import { startLogosWebView } from './logos-view-loader.js';
+
+const logs = [];
+for (const level of ['log', 'warn', 'error', 'info', 'debug']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    logs[logs.length] = level + ': ' + args.map(String).join(' ');
+    original(...args);
+  };
+}
+
+const report = (o) => { fetch('/result', { method: 'POST', body: JSON.stringify(o) }).catch(() => {}); };
+window.onerror = (m) => report({ ok: false, error: 'window.onerror: ' + m, logs });
+window.onunhandledrejection = (e) =>
+  report({ ok: false, error: 'unhandled rejection: ' + ((e.reason && e.reason.stack) || e.reason), logs });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── the container, in twenty lines ─────────────────────────────────────────
+//
+// logos-protocol's web transport, from the other side. The container relays
+// these texts between the page and the core; here they stop at a stub that
+// answers ONE module — which is the whole of what the page can observe about
+// what is behind it, and exactly why the stub is honest: the frames are real,
+// the routing beyond the channel is not this repo's to test.
+const CALL = 1, RESULT = 2;
+const heard = [];
+
+let deliverToPage = null;
+const containerChannel = {
+  setReceiver: (fn) => { deliverToPage = fn; },
+  send: (text) => {
+    const msg = JSON.parse(text);
+    heard[heard.length] = msg;
+    if (msg.type !== CALL) return;
+    const { id, object, method, args } = msg.payload;
+    // A NATIVE module, from the page's point of view: it is not in this page,
+    // it is not in either wasm image, and the only way the view reached it was
+    // the router in the module's own backend image.
+    const value = (object === 'greeter' && method === 'greet')
+      ? 'hello ' + args[0]
+      : null;
+    const payload = value === null
+      ? { id, ok: false, err: 'no such module: ' + object, errCode: 'MODULE_NOT_LOADED' }
+      : { id, ok: true, value };
+    // Asynchronously, like a real core: the whole reason `logos.callModule` is
+    // refused in this container is that the answer arrives through the event
+    // loop.
+    setTimeout(() => deliverToPage(JSON.stringify({ type: RESULT, payload })), 0);
+  },
+  close: () => {},
+};
+window.logosChannelReady = Promise.resolve(containerChannel);
+window.logosQmlRuntimeBase = 'logos-runtime/';
+
+// A real pointer event on the button the QML drew. Qt for WebAssembly paints
+// into a canvas inside a shadow root and listens on the `qt-window` div that
+// holds it, so the target is the element AT THE POINT rather than the canvas.
+function clickAt(x, y) {
+  const host = document.querySelector('#qt-shadow-container');
+  const root = (host && host.shadowRoot) || document;
+  const canvas = root.querySelector('canvas');
+  if (!canvas) return 'no canvas in the Qt shadow root';
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + x, cy = rect.top + y;
+  const target = (root.elementFromPoint ? root.elementFromPoint(cx, cy) : null) || canvas;
+  const base = {
+    bubbles: true, cancelable: true, composed: true,
+    clientX: cx, clientY: cy, screenX: cx, screenY: cy,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0.5,
+  };
+  target.dispatchEvent(new PointerEvent('pointermove', Object.assign({}, base, { button: -1, buttons: 0 })));
+  target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, base, { button: 0, buttons: 1 })));
+  target.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, base, { button: 0, buttons: 0, pressure: 0 })));
+  return '';
+}
+
+// THE ASSERTIONS THAT NEED THE MODULE'S COOPERATION, opted into explicitly.
+//
+// A view draws into a canvas: from outside it there is no DOM to query, no
+// button to find and no text to read. The fixture in tests/fixtures/
+// web-view-counter therefore logs what it does — where its button is, when its
+// replica arrived, what the property change did — and this harness reads the
+// console. Against any OTHER variant those checks would silently not run, so
+// they are gated on a flag the caller passes rather than on whether the lines
+// happened to appear.
+const instrumented = new URL(window.location.href).searchParams.get('instrumented') === '1';
+
+async function main() {
+  const checks = [];
+  const check = (name, ok, detail) => { checks[checks.length] = { name, ok, detail: detail || '' }; };
+  // `since` is not optional bookkeeping: the view logs its count on every
+  // change, INCLUDING the first binding, so "wait for a count line" would be
+  // satisfied by the line that was already there before the click. Every wait
+  // that is about something the harness just caused passes the log length it
+  // measured beforehand.
+  //
+  // And no `$` in any of these patterns. Qt's wasm message handler ends each
+  // console line with a newline, which `.*$` cannot reach past — the symptom is
+  // a wait that times out against a line plainly visible in the transcript.
+  const findLog = (re, since) => {
+    for (let i = logs.length - 1; i >= (since || 0); i--) {
+      const m = re.exec(logs[i]);
+      if (m) return m;
+    }
+    return null;
+  };
+  const waitFor = async (re, since, tries) => {
+    for (let i = 0; i < (tries || 100); i++) {
+      const m = findLog(re, since);
+      if (m) return m;
+      await sleep(100);
+    }
+    return null;
+  };
+
+  try {
+    // EVERYTHING THE VARIANT IS, read out of the variant. Nothing below names
+    // the fixture, so this harness runs against any ui_qml `web` variant.
+    const manifest = await (await fetch('manifest.json')).json();
+    const view = manifest.logos_web_view;
+    check('the manifest declares a qml web variant',
+          manifest.logos_web_runtime === 'qml' && !!view, JSON.stringify(manifest.logos_web_runtime));
+
+    const state = await startLogosWebView({
+      module: manifest.name,
+      viewEntry: view.qml,
+      backendGlue: view.backend_glue,
+      backendEntry: view.backend_entry,
+      container: document.querySelector('#logos-view'),
+      runtimeBase: window.logosQmlRuntimeBase,
+      channelReady: window.logosChannelReady,
+    });
+    check('the shipped loader brings the variant up', true);
+    check('the backend image is serving', state.backend.logosViewHostServing() === true);
+    check('the backend image knows which module it is',
+          state.backend.logosViewHostModule() === manifest.name,
+          state.backend.logosViewHostModule());
+
+    // ── the backend's own state, which any variant exposes ────────────────
+    //
+    // `logosViewHostBackendJson` is the backend QObject's property set — the
+    // same set QtRO is remoting to the view. Read from the BACKEND side because
+    // that side is the same for every variant: a module's QML owes this harness
+    // nothing, and a canvas has no DOM to read a label out of.
+    const backendState = () => JSON.parse(state.backend.logosViewHostBackendJson());
+    check('the backend publishes the .rep properties the replica will carry',
+          Object.keys(backendState()).length > 0, JSON.stringify(backendState()));
+
+    // ── a real click drives the backend ───────────────────────────────────
+    //
+    // The button's position comes from the view, in window coordinates, so this
+    // needs the instrumented fixture; against any other variant the harness
+    // says so rather than pretending to have clicked.
+    if (instrumented) {
+      const ready = await waitFor(new RegExp('logos-view: ready ' + manifest.name + ' count=(\\d+)'));
+      check('the view took its backend replica over the MessagePort',
+            ready !== null && ready[1] === '0', ready ? 'count=' + ready[1] : 'never became ready');
+
+      const at = await waitFor(/logos-view: button-at (\d+) (\d+)/);
+      check('the view is laid out (the runtime sized it)', at !== null,
+            at ? at[1] + ',' + at[2] : 'the button never reported a position');
+      if (at) {
+        const before = logs.length;
+        const err = clickAt(Number(at[1]), Number(at[2]));
+        check('a pointer event reached the canvas', err === '', err);
+
+        // TWO ASSERTIONS, NOT ONE, and the difference is the whole round trip:
+        // the backend's own count says the click reached it through the
+        // replica, and the view's log says the property change came BACK and
+        // the binding re-evaluated. Either alone is half the wire.
+        const counted = await waitFor(
+          new RegExp('logos-view: changed ' + manifest.name + ' count=(\\d+)'), before);
+        check('the click drove the backend through the replica',
+              backendState().count === 1, JSON.stringify(backendState()));
+        check('the property change came back and updated the view',
+              counted !== null && counted[1] === '1',
+              counted ? 'count=' + counted[1] : 'the view never saw the change');
+      }
+
+      // ── callModuleAsync left the page as a real protocol call ───────────
+      const answered = await waitFor(/logos-view: callModuleAsync -> (.+)/);
+      const calls = heard.filter((m) => m.type === CALL);
+      check('callModuleAsync left the page as a logos-protocol Call',
+            calls.length === 1 && calls[0].payload.object === 'greeter'
+              && calls[0].payload.method === 'greet',
+            JSON.stringify(calls.map((c) => c.payload.object + '.' + c.payload.method)));
+      check('the native module\'s answer reached the view',
+            answered !== null && answered[1].indexOf('hello logos') >= 0,
+            answered ? answered[1] : 'the callback never fired');
+    }
+
+    // ── a second module's QML, into the SAME runtime ──────────────────────
+    //
+    // Slice 27's fourth criterion. The document is this module's own, installed
+    // again under a second name: what is being asserted is that the RUNTIME
+    // serves it, and run.mjs counts the requests for the runtime image to show
+    // that no second one was fetched.
+    const qml = await (await fetch(view.qml)).text();
+    const second = state.runtime.logosInstallModuleView('second_module', qml);
+    check('a second module\'s QML installs into the same runtime',
+          second === true, state.runtime.logosRuntimeLastError());
+
+    await sleep(1500);
+    const failed = checks.filter((c) => !c.ok);
+    report({ ok: failed.length === 0, checks, logs, instrumented });
+  } catch (e) {
+    report({ ok: false, checks, logs, error: String((e && e.stack) || e) });
+  }
+}
+
+main();
+</script>
+</body>
+</html>
