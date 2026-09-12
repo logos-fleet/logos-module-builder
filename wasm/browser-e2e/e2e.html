@@ -25,7 +25,7 @@ const logs = [];
 for (const level of ['log', 'warn', 'error', 'info', 'debug']) {
   const original = console[level].bind(console);
   console[level] = (...args) => {
-    logs[logs.length] = level + ': ' + args.map(String).join(' ');
+    logs.push(level + ': ' + args.map(String).join(' '));
     original(...args);
   };
 }
@@ -52,7 +52,7 @@ const containerChannel = {
   setReceiver: (fn) => { deliverToPage = fn; },
   send: (text) => {
     const msg = JSON.parse(text);
-    heard[heard.length] = msg;
+    heard.push(msg);
     if (msg.type !== CALL) return;
     const { id, object, method, args } = msg.payload;
     // A NATIVE module, from the page's point of view: it is not in this page,
@@ -109,7 +109,7 @@ const instrumented = new URL(window.location.href).searchParams.get('instrumente
 
 async function main() {
   const checks = [];
-  const check = (name, ok, detail) => { checks[checks.length] = { name, ok, detail: detail || '' }; };
+  const check = (name, ok, detail) => { checks.push({ name, ok, detail: detail || '' }); };
   // `since` is not optional bookkeeping: the view logs its count on every
   // change, INCLUDING the first binding, so "wait for a count line" would be
   // satisfied by the line that was already there before the click. Every wait

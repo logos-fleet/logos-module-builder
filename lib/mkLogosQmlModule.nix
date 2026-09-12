@@ -137,6 +137,21 @@ let
   # The QML view directory is derived from the "view" field (e.g. "qml/Main.qml" -> "qml")
   viewDir = builtins.dirOf config.view;
 
+  # The same directory as a path relative to the module's TREE. `view` is
+  # relative to either the project root or src/ and both layouts are in use, so
+  # this tries them in the order mkCombined does. `generate` snapshots the
+  # module's own tree, so the relative answer is the same there as in src —
+  # which is why the iOS view framework and the `web` variant, both of which
+  # build out of the generate tree, resolve it here rather than in their
+  # builders. null when neither layout has it: the two callers disagree about
+  # what that means, so neither the throw nor the fallback belongs in here.
+  qmlDirFor = view:
+    let rel = builtins.dirOf view; in
+    if view == null then null
+    else if builtins.pathExists "${src}/src/${rel}" then "src/${rel}"
+    else if builtins.pathExists "${src}/${rel}" then rel
+    else null;
+
   mkStandaloneApp = import ./mkStandaloneApp.nix;
 
   forAllSystems = f: lib.genAttrs common.systems (system: f system);
@@ -253,15 +268,13 @@ let
           # `view` is "qml/Main.qml" (a path relative to src/ or to the project
           # root); the framework's qrc is built from the DIRECTORY and entered
           # at the file. Resolved here rather than in CMake because this is
-          # where the same two-layout search mkCombined does already lives.
+          # where the module's source tree is; qmlDirFor does the two-layout
+          # search, and an absent directory is fatal for THIS output.
           viewDirRel = builtins.dirOf mobileConfig.view;
           viewEntry = builtins.baseNameOf mobileConfig.view;
-          # Both layouts the QML pipeline accepts, in the order mkCombined
-          # tries them. `generate` snapshots the module's own tree, so the
-          # relative answer is the same there as in src.
           qmlDirRel =
-            if builtins.pathExists "${src}/src/${viewDirRel}" then "src/${viewDirRel}"
-            else if builtins.pathExists "${src}/${viewDirRel}" then viewDirRel
+            let resolved = qmlDirFor mobileConfig.view; in
+            if resolved != null then resolved
             else throw ("logos-module-builder: module '" + mobileConfig.name
               + "' declares view \"" + mobileConfig.view + "\" but neither src/"
               + viewDirRel + " nor " + viewDirRel + " exists. The iOS framework "
@@ -312,24 +325,21 @@ let
   # A ui_qml module's third artifact, beside the desktop plugin and the iOS view
   # framework, and cut from the same `generate` tree as both.
   #
-  # `view` is "qml/Counter.qml" — relative to the project root or to src/, and
-  # BOTH layouts are in use. Resolved against the source tree, exactly as the
-  # iOS view framework's is: `generate` snapshots the module's own tree, so the
-  # relative answer is the same there as here.
-  webViewQmlDir =
-    let rel = builtins.dirOf (config.view or ""); in
-    if config.view == null then null
-    else if builtins.pathExists "${src}/src/${rel}" then "src/${rel}"
-    else if builtins.pathExists "${src}/${rel}" then rel
-    else null;
+  # The directory this variant ships, resolved against the source tree exactly
+  # as the iOS view framework's is. null — no `view`, or neither layout has its
+  # directory — is not fatal here: it is one of the six things below that turn
+  # the `web` output off.
+  webViewQmlDir = qmlDirFor config.view;
 
-  # FIVE THINGS HAVE TO BE TRUE, and each absence is a real state rather than an
+  # SIX THINGS HAVE TO BE TRUE, and each absence is a real state rather than an
   # error: the module has a C++ backend at all, it DECLARED one that is
   # separable from its plugin (`web.view_backend` — see parseMetadata for why it
-  # cannot be derived), it has a `view` document, the pinned logos-nix publishes
-  # a Qt for WebAssembly, and the pinned logos-view-module-runtime publishes the
-  # wasm half this image links. Any missing means no `web` output on this
-  # module, which is what a pin rollout looks like from here.
+  # cannot be derived), it has a `view` document whose directory is on disk, the
+  # pinned logos-nix publishes a Qt for WebAssembly, the pinned
+  # logos-view-module-runtime publishes the wasm half this image links, and the
+  # pinned logos-protocol publishes the web transport behind it. Any missing
+  # means no `web` output on this module, which is what a pin rollout looks like
+  # from here.
   webViewFor = system:
     let
       pkgs = pkgsFor system;
