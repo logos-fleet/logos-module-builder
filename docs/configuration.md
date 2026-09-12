@@ -248,6 +248,36 @@ The build system copies the view directory (e.g. `qml/`) alongside the plugin `.
 "view": "qml/Main.qml"
 ```
 
+### `web.view_backend`
+**Type:** object
+**Default:** null (only meaningful for `type == "ui_qml"`)
+
+What a `ui_qml` module's **`web` variant** compiles into its Qt-for-WebAssembly
+image: the class that IS its `.rep` backend, the header declaring it, and the
+translation units that belong to it alone.
+
+```json
+"web": {
+  "view_backend": {
+    "class":   "CounterBackend",
+    "header":  "src/CounterBackend.h",
+    "sources": ["src/CounterBackend.cpp"]
+  }
+}
+```
+
+Declaring it is what gives the module a `nix build .#web` at all (see
+`docs/nix-api.md`, "The `web` output of a `ui_qml` module"). It cannot be
+derived from `SOURCES`: that list is the Qt **plugin**, whose object inherits
+`LogosViewPluginBase` and holds a `LogosAPI`, and neither exists inside a wasm
+image. A module whose plugin object *is* its `.rep` source has no separable
+backend and therefore no `web` variant — which is better than one that fails to
+compile three layers down.
+
+Refused on any type but `ui_qml`: a headless module's `web` variant is the Bare
+Wasm host, which needs no declaration, so a `view_backend` there would be a key
+its author believes did something.
+
 ### The three dependency kinds
 
 A module can name what it talks to in three ways. They differ in **who picks the

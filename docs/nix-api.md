@@ -220,7 +220,8 @@ Returns an attribute set with:
       # Only for `interface: "cdylib"` and core `interface: "universal"` modules:
       bare = <Bare module artifact>;          # also under packages.aarch64-ios,
       <name>-bare = <Bare module artifact>;   # .aarch64-ios-simulator, .aarch64-android
-      web  = <`web` LGX variant: Wasm host + loader page>;
+      web  = <`web` LGX variant: the Wasm host + loader page for a headless
+               module, or the QML + Qt-wasm view backend for a ui_qml one>;
       <name>-web = <the same>;
 
       # Only when externalLibInputs uses structured format with variants:
@@ -431,9 +432,10 @@ variant exists at all — so the host is compiled into the same image and the
 module and the protocol are one link.
 
 Admission is the same as `bare`'s: `interface: "cdylib"` and core
-`interface: "universal"` modules only. A `ui_qml` view backend or a `legacy`
-module is a Qt plugin object holding a `LogosAPI` and has no protocol-free form
-to compile.
+`interface: "universal"` modules only. A `legacy` module is a Qt plugin object
+holding a `LogosAPI` and has no protocol-free form to compile. A `ui_qml`
+module gets a `web` output too, but a **different** one — see below; the two
+can never collide, because the two admission rules are disjoint by module type.
 
 The container is unchanged and is not wasm-aware. It opens `main` in a webview
 and relays the web transport across its bridge; the page relays that to the
@@ -452,6 +454,86 @@ message port has a `Module.logosOut` fallback for exactly this — and asserts
 `add(1, 2)` is 3 through the real JSON envelope, codec, peer and provider, that
 the door shuts once a token arrives, and that a second image sees neither the
 first one's tokens nor its state.
+
+### The `web` output of a `ui_qml` module — its QML and a Qt-wasm view backend
+
+```bash
+nix build .#web        # on a type: ui_qml module with a web.view_backend
+```
+
+The other `web` variant, and the one a module with a UI gets (ADR 0004, slice
+27). The QML goes to the app's **bundled Qt-for-WebAssembly QML runtime** —
+~26 MB, shipped and signed with the app, downloaded once for every module — and
+the module's C++ backend is compiled into a small Qt-wasm image of its own,
+joined to the runtime by Qt Remote Objects over an HTML MessagePort:
+
+```
+<name>_web/
+  manifest.json              main = index.html, logos_web_runtime = "qml"
+  index.html                 the loader page
+  logos-view-loader.js       what it runs: boots both images, joins them
+  view/<entry>.qml           the module's QML, as the page fetches it
+  <name>_view_backend.js     the backend image's emscripten glue
+  <name>_view_backend.wasm   the backend image (~4 MB raw, ~0.9 MB brotli)
+  web-view.json              what the build measured
+```
+
+**How it differs from the Bare `web` variant above**, point by point, because
+none of it is a variation on a theme:
+
+| | Bare module's `web` | `ui_qml` module's `web` |
+|---|---|---|
+| image | one, Qt-free, in a Worker | one, Qt-wasm, on the page thread |
+| API | the web transport | a QtRO source (the `.rep`) + a call router |
+| UI | none | a QML document, loaded by the bundled runtime |
+| `file://` | works (image embedded in the glue) | **no**: the page fetches its own QML and the runtime from another directory |
+
+The Worker is not available here: Qt for WebAssembly is loaded by `qtloader.js`,
+which is DOM-bound. And the image is a real separate `.wasm` rather than
+`-sSINGLE_FILE`, because a page that has to be served anyway gains nothing from
+base64 and pays a third of 4 MB for it.
+
+**Declared, not derived.** A ui_qml module's `SOURCES` is its Qt *plugin* — an
+object that inherits `LogosViewPluginBase` and holds a `LogosAPI`, neither of
+which exists in a wasm image — so the subset that is only the backend cannot be
+guessed. `metadata.json` names it:
+
+```json
+"web": {
+  "view_backend": {
+    "class":   "CounterBackend",
+    "header":  "src/CounterBackend.h",
+    "sources": ["src/CounterBackend.cpp"]
+  }
+}
+```
+
+A module whose backend is not separable from its plugin (the plugin IS the
+`.rep` source, a perfectly good desktop design) simply has no `web` output,
+which is better than one that fails to compile three layers down.
+
+**Not yet the scaffolded shape.** `nix flake init -t …#ui-qml-backend` gives a
+backend that inherits `LogosUiPluginContext` — the SDK type carrying
+`modules()` and the event subscriptions — and that type does not exist in a
+wasm image. A module written to that template therefore has to grow a backend
+class free of it before it can declare `web.view_backend`. The counter
+(`repos/counter`) is the worked example of the separable shape: a plain
+`CounterSimpleSource` subclass, with the plugin object owning one.
+
+**What the page does**, and it is the whole of the container's contract with a
+variant: read `window.logosQmlRuntimeBase` (where the app serves the runtime)
+and `window.logosChannelReady` (the container's channel, the same seam the Bare
+variant uses), publish `window.logosWebViewReady`, and join the two images with
+one `MessageChannel`. `logos.callModuleAsync` from the module's QML is remoted
+to the backend image's `LogosWebCallRouter`, which makes a real logos-protocol
+call out through that channel — the runtime is the app's and must not grow a
+protocol client.
+
+`checks.<system>.web-view-variant` builds the variant and checks the package;
+`wasm/browser-e2e/run.mjs` boots it in headless Chrome against a real bundled
+runtime, clicks the button with a real pointer event and watches the count come
+back. The second is not a nix check and cannot be one — no browser in the
+sandbox, no chromium in darwin nixpkgs.
 
 ### The `view` output — a `ui_qml` module as an iOS framework
 

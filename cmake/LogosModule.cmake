@@ -931,6 +931,195 @@ function(logos_wasm_module)
 endfunction()
 
 #[=======================================================================[.rst:
+logos_wasm_view_module
+----------------------
+
+Build the **view backend's Wasm host**: a ``type: ui_qml`` module's C++ backend
+compiled for wasm32-emscripten against Qt-for-WebAssembly, serving its ``.rep``
+source over Qt Remote Objects on a MessagePort to the bundled QML runtime in the
+same page (ADR 0004, slice 27).
+
+``logos_module()`` routes here when ``LOGOS_MODULE_WEB_VIEW`` is ON and then
+returns, so this build never calls ``logos_find_qt()`` — it finds its own Qt,
+which is the wasm one, and never the SDK's desktop stack.
+
+THE DIFFERENCE FROM :cmake:command:`logos_wasm_module`, which is not a variation
+on a theme. That one compiles a Bare module: no Qt, the module-impl C ABI, the
+web transport as its whole surface. This one compiles a QObject generated from a
+``.rep`` and remotes it, because a view reaches its backend through a REPLICA and
+QtRO is the only thing that speaks replicas. Two images, two links, and merging
+them would put Qt in every headless module.
+
+WHICH SOURCES. Not ``SOURCES`` — that list is the Qt PLUGIN, and a plugin object
+inherits ``LogosViewPluginBase`` and holds a ``LogosAPI``, neither of which
+exists in a wasm image. ``BACKEND_SOURCES`` names the translation units that are
+only the backend, ``BACKEND_HEADER`` the one this host includes and
+``BACKEND_CLASS`` the type it instantiates. They come from the module's metadata
+(``web.view_backend``), which is also what decides whether the ``web`` output
+exists at all — so a module whose backend is not separable from its plugin has
+no ``web`` variant rather than a broken one.
+#]=======================================================================]
+function(logos_wasm_view_module)
+    cmake_parse_arguments(
+        VWASM
+        ""
+        "NAME;REP_FILE;BACKEND_CLASS;BACKEND_HEADER"
+        "BACKEND_SOURCES;FIND_PACKAGES;LINK_LIBRARIES;LINK_TARGETS;INCLUDE_DIRS"
+        ${ARGN}
+    )
+
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): this output only exists under "
+            "the Emscripten toolchain, against logos-nix' Qt-for-WebAssembly.")
+    endif()
+    if(NOT VWASM_REP_FILE)
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): a view backend is a .rep "
+            "source. Without REP_FILE there is nothing for the QML runtime's "
+            "replica to acquire.")
+    endif()
+    if(NOT VWASM_BACKEND_CLASS OR NOT VWASM_BACKEND_HEADER)
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): BACKEND_CLASS and "
+            "BACKEND_HEADER are required. They come from the module's metadata "
+            "(web.view_backend) and name the QObject this image hosts.")
+    endif()
+    if(NOT LOGOS_WEB_RUNTIME_ROOT)
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): LOGOS_WEB_RUNTIME_ROOT is not "
+            "set. It must name an installed logos-view-module-runtime web half "
+            "(liblogos_messageport.a, liblogos_web_runtime.a and their headers), "
+            "which is what carries the messageport: QtRO scheme and the call "
+            "router.")
+    endif()
+    if(NOT LOGOS_PROTOCOL_WASM_ROOT)
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): LOGOS_PROTOCOL_WASM_ROOT is "
+            "not set. The router's far end makes a real logos-protocol call, so "
+            "the web transport has to be in this image.")
+    endif()
+
+    set(_view_builder_root "${LOGOS_MODULE_BUILDER_ROOT}")
+    if(NOT _view_builder_root)
+        set(_view_builder_root "$ENV{LOGOS_MODULE_BUILDER_ROOT}")
+    endif()
+    if(NOT _view_builder_root OR NOT EXISTS "${_view_builder_root}/wasm/logos_view_wasm_host.cpp")
+        message(FATAL_ERROR
+            "logos_wasm_view_module(${VWASM_NAME}): wasm/logos_view_wasm_host.cpp "
+            "was not found. LOGOS_MODULE_BUILDER_ROOT must name this repo's root; "
+            "it resolved to '${_view_builder_root}'.")
+    endif()
+
+    foreach(pkg ${VWASM_FIND_PACKAGES})
+        find_package(${pkg} REQUIRED)
+    endforeach()
+
+    # Core and RemoteObjects and NOTHING ELSE. This image draws nothing: the
+    # scene belongs to the bundled runtime, which is the entire point of ADR
+    # 0004's split, and a Qt Gui in here would be a second copy of it per module.
+    # Network as well as the two this image names, and it is not decoration:
+    # Qt6::RemoteObjects links it, and the static-plugin finalizer below walks
+    # the plugin list of EVERY linked Qt module. A module found only as a
+    # transitive dependency has no `Qt6Network_*` variables in this scope, and
+    # the finalizer then asks cmake for a target called `::QTlsBackendCertOnly-
+    # Plugin` — the empty namespace being the missing variable — and fails the
+    # configure with an error that names a TLS plugin nothing here wants.
+    find_package(Qt6 REQUIRED COMPONENTS Core Network RemoteObjects)
+    find_package(nlohmann_json REQUIRED)
+
+    set(_VIEW_TARGET ${VWASM_NAME}_view_backend)
+
+    # MANUAL_FINALIZATION, and finalized at the bottom of this function. Qt's
+    # automatic finalizer is DEFERRED to the end of the directory scope, by
+    # which time every variable find_package set in this FUNCTION's scope is
+    # gone — including the ones it reads to resolve the static QML/TLS plugins.
+    # Finalizing here runs it while they are still in scope.
+    qt_add_executable(${_VIEW_TARGET}
+        MANUAL_FINALIZATION
+        ${VWASM_BACKEND_SOURCES}
+        "${_view_builder_root}/wasm/logos_view_wasm_host.cpp"
+    )
+    qt6_add_repc_sources(${_VIEW_TARGET} ${VWASM_REP_FILE})
+
+    set_target_properties(${_VIEW_TARGET} PROPERTIES
+        AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+    target_compile_features(${_VIEW_TARGET} PRIVATE cxx_std_17)
+
+    # Which module this image serves, which class is its backend and where that
+    # class is declared. All three are build-time facts: one image is one
+    # module and there is nothing in a page to discover them from.
+    target_compile_definitions(${_VIEW_TARGET} PRIVATE
+        LOGOS_WASM_MODULE_NAME="${VWASM_NAME}"
+        LOGOS_WASM_VIEW_BACKEND_CLASS=${VWASM_BACKEND_CLASS}
+        LOGOS_WASM_VIEW_BACKEND_HEADER="${VWASM_BACKEND_HEADER}")
+
+    target_include_directories(${_VIEW_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated_code"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated_code/include"
+        "${LOGOS_WEB_RUNTIME_ROOT}/include"
+        # The wasm protocol's headers, installed flat by its nix/wasm.nix.
+        "${LOGOS_PROTOCOL_WASM_ROOT}/include")
+
+    foreach(dir ${VWASM_INCLUDE_DIRS})
+        target_include_directories(${_VIEW_TARGET} PRIVATE ${dir})
+    endforeach()
+
+    find_library(_LOGOS_PROTOCOL_WASM_LIB
+        NAMES logos_protocol_wasm
+        PATHS "${LOGOS_PROTOCOL_WASM_ROOT}/lib"
+        NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+    if(NOT _LOGOS_PROTOCOL_WASM_LIB)
+        message(FATAL_ERROR
+            "liblogos_protocol_wasm.a was not found in "
+            "${LOGOS_PROTOCOL_WASM_ROOT}/lib.")
+    endif()
+
+    # Plain paths and in this order: liblogos_web_runtime.a (which carries
+    # LogosWebCallRouter) references the transport, and a static archive is
+    # searched only for symbols still undefined when the linker reaches it.
+    #
+    # Only the ROUTER's object is pulled out of liblogos_web_runtime.a — nothing
+    # here names LogosWebRuntime or LogosWebBridge, both of which want Qt Qml.
+    # That is a property of static linking, so it is checked rather than trusted:
+    # the nix wrapper asserts this image carries no QML engine.
+    target_link_libraries(${_VIEW_TARGET} PRIVATE
+        "${LOGOS_WEB_RUNTIME_ROOT}/lib/liblogos_web_runtime.a"
+        "${LOGOS_WEB_RUNTIME_ROOT}/lib/liblogos_messageport.a"
+        ${_LOGOS_PROTOCOL_WASM_LIB}
+        nlohmann_json::nlohmann_json
+        Qt6::Core
+        Qt6::RemoteObjects
+        ${VWASM_LINK_LIBRARIES})
+
+    foreach(target ${VWASM_LINK_TARGETS})
+        if(TARGET ${target})
+            target_link_libraries(${_VIEW_TARGET} PRIVATE ${target})
+        else()
+            message(FATAL_ERROR
+                "LINK_TARGETS target '${target}' was not defined before "
+                "logos_module(). Refusing to silently drop a configured link target.")
+        endif()
+    endforeach()
+
+    # The archives are consumed as plain paths (the web half exports no package
+    # config), so the embind flag their INTERFACE would have carried is restated
+    # here. Without it every page-facing export is an undefined symbol.
+    target_link_options(${_VIEW_TARGET} PRIVATE "-lembind")
+
+    set_target_properties(${_VIEW_TARGET} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web-view")
+
+    qt_finalize_target(${_VIEW_TARGET})
+
+    message(STATUS "Logos view backend ${VWASM_NAME} configured for wasm "
+                   "(${VWASM_BACKEND_CLASS} over QtRO on messageport:)")
+endfunction()
+
+#[=======================================================================[.rst:
 logos_view_framework
 --------------------
 
@@ -1325,6 +1514,39 @@ function(logos_module)
     # this line is how that stays true: a second copy anywhere in the tree names
     # itself here instead of being silently selected.
     message(STATUS "LogosModule.cmake: ${CMAKE_CURRENT_FUNCTION_LIST_FILE}")
+
+    # LOGOS_MODULE_WEB_VIEW switches a `type: ui_qml` module to the OTHER wasm
+    # shape: its .rep backend on Qt-for-WebAssembly, remoted to the bundled QML
+    # runtime that carries its QML (ADR 0004, slice 27).
+    #
+    # BEFORE logos_find_dependencies(), unlike the three branches below, and the
+    # difference is real rather than tidiness: this image compiles the backend's
+    # own translation units and the repc output, and NOTHING from logos-cpp-sdk
+    # or the desktop logos-protocol. It cannot: the generated consumer wrappers
+    # hold a LogosAPI and the desktop protocol brings Qt Network, Boost and
+    # OpenSSL, none of which exists under emscripten. Requiring the two roots
+    # here would make every ui_qml `web` build carry a desktop SDK it never
+    # opens -- and, worse, put its headers on the include path of an image that
+    # must not see them.
+    #
+    # The three BACKEND_* values are not parsed out of SOURCES: they arrive as
+    # -D flags from the nix builder, which read them from the module's metadata
+    # (web.view_backend). See logos_wasm_view_module for why the plugin's own
+    # sources cannot be compiled here.
+    if(LOGOS_MODULE_WEB_VIEW)
+        logos_wasm_view_module(
+            NAME ${MODULE_NAME}
+            REP_FILE ${MODULE_REP_FILE}
+            BACKEND_CLASS ${LOGOS_WEB_VIEW_BACKEND_CLASS}
+            BACKEND_HEADER ${LOGOS_WEB_VIEW_BACKEND_HEADER}
+            BACKEND_SOURCES ${LOGOS_WEB_VIEW_BACKEND_SOURCES}
+            FIND_PACKAGES ${MODULE_FIND_PACKAGES}
+            LINK_LIBRARIES ${MODULE_LINK_LIBRARIES}
+            LINK_TARGETS ${MODULE_LINK_TARGETS}
+            INCLUDE_DIRS ${MODULE_INCLUDE_DIRS}
+        )
+        return()
+    endif()
 
     # Find dependencies
     logos_find_dependencies()

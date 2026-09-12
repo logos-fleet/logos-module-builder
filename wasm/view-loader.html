@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <title>@MODULE@</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0d0e; }
+    #logos-view { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+<!--
+  THE ENTRY DOCUMENT of a `ui_qml` module's `web` variant (ADR 0004, slice 27).
+
+  Deliberately almost empty: the work is in logos-view-loader.js, which the
+  container runs and a test drives, so that what is checked and what ships are
+  the same code. Everything this file adds is the five values the BUILD knows —
+  the module's name, its QML document, the backend image's glue and entry point,
+  and the element the runtime draws into.
+
+  What the container may set before this runs:
+
+    window.logosQmlRuntimeBase   where the app serves its bundled QML runtime
+                                 (default: a `logos-runtime/` directory beside
+                                 this document)
+    window.logosChannelReady     a Promise of the container's channel, the same
+                                 seam a Bare `web` variant's loader uses
+
+  What it publishes:
+
+    window.logosWebViewReady     a Promise of { module, runtime, backend }, or a
+                                 rejection naming the step that failed. A host
+                                 that wants to know the view is up — and one that
+                                 wants to say why it is not — reads this.
+-->
+<div id="logos-view"></div>
+<script type="module">
+import { startLogosWebView } from './logos-view-loader.js';
+
+// The backend image's own byte size, measured at BUILD time. Logged rather than
+// asserted: it is the number a size-regression gate and a slow-network report
+// both want, and nothing at runtime can weigh a linked image.
+const BACKEND_WASM_BYTES = @BACKEND_WASM_BYTES@;
+
+window.logosWebViewReady = startLogosWebView({
+  module: '@MODULE@',
+  viewEntry: '@VIEW_ENTRY@',
+  backendGlue: '@BACKEND_JS@',
+  backendEntry: '@BACKEND_ENTRY@',
+  container: document.querySelector('#logos-view'),
+  runtimeBase: window.logosQmlRuntimeBase,
+  channelReady: window.logosChannelReady || null,
+});
+
+window.logosWebViewReady.then((state) => {
+  console.log('[logos-web-view @MODULE@] serving; backend image '
+              + BACKEND_WASM_BYTES + ' bytes, cold instantiate '
+              + state.backend.logosViewHostReadyMs().toFixed(1) + ' ms');
+}).catch((e) => {
+  // SAID OUT LOUD. A view that did not come up is a blank rectangle, which is
+  // indistinguishable from one that has not come up YET; the container reads the
+  // rejection above, and this is for whoever has the console open.
+  console.error('[logos-web-view @MODULE@] did not start: ' + ((e && e.message) || e));
+});
+</script>
+</body>
+</html>

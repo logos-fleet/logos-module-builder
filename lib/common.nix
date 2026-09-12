@@ -145,6 +145,16 @@ let
   # which is what this one predicate buys.
   hasMobileSupport = logos-nix != null && logos-nix ? lib.mkIosPkgs;
 
+  # Qt for WebAssembly, from the repo that owns the toolchain pin. Null on a
+  # logos-nix that predates nix/wasm/qt.nix, for exactly the reason
+  # hasMobileSupport exists: an input walked back to an upstream rev must
+  # degrade to "no such output" rather than throw on an attribute that is not
+  # there. The `web` variant of a ui_qml module is the only consumer.
+  qtWasmFor = system:
+    if logos-nix != null && logos-nix ? lib.qtWasmFor
+    then logos-nix.lib.qtWasmFor system
+    else null;
+
   mobileSystems =
     if hasMobileSupport then [ "aarch64-ios" "aarch64-ios-simulator" "aarch64-android" ]
     else [ ];
@@ -312,6 +322,7 @@ let
 in {
   inherit systems mkPkgs mkPkgsWith forAllSystems buildSystemFor;
   inherit mobileSystems mkMobilePkgs forAllMobileSystems mobileRustTargets;
+  inherit qtWasmFor;
   inherit androidBuildSystems defaultAndroidBuildSystem;
   inherit classifyConcreteDeps;
 

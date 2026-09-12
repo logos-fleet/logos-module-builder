@@ -227,6 +227,13 @@
         # Likewise a FLAKE, for packages.<sys>.logos-view-templates — the
         # LOGOS_VIEW_TEMPLATE_DIR every ui_qml plugin build is handed.
         inherit logos-view-module;
+        # And the RUNTIME flake, for packages.<sys>.qml-runtime-wasm: the web
+        # half of it (liblogos_messageport.a, liblogos_web_runtime.a and their
+        # headers, all installed into that same output) is what a ui_qml
+        # module's Qt-wasm view backend links. Same input the view-interface-abi
+        # check already reads — that one takes its desktop headers, this one its
+        # wasm archives.
+        inherit logos-view-module-runtime;
         inherit rust-overlay;
         inherit (nixpkgs) lib;
         uiBackend = logos-plugin-qt.rawLib or logos-plugin-qt.lib;
@@ -386,6 +393,44 @@
             echo "      no \`web\` output to test. Bump the logos-protocol input,"
             echo "      or run through the workspace flake:"
             echo "        ws test logos-module-builder --local logos-protocol logos-nix"
+            mkdir -p $out
+            echo skipped > $out/result
+          '';
+        # Integration test: the OTHER `web` output — a ui_qml module's QML plus
+        # its Qt-for-WebAssembly view backend (ADR 0004, slice 27). The build
+        # gates its own bytes; this checks the four files name each other, the
+        # image is a real separate .wasm, and the variant does not carry a copy
+        # of the app's bundled QML runtime.
+        #
+        # A SKIP THAT SAYS SO, on the same reasoning as web-variant above and
+        # with one more input in the condition: this one also needs a Qt for
+        # WebAssembly from logos-nix and the wasm half of
+        # logos-view-module-runtime. Any of the three pins predating its wasm
+        # output is a pin rollout, not a defect.
+        web-view-variant =
+          let
+            hasProtocolWasm = (logos-protocol.packages.${system} or {}) ? logos-protocol-wasm;
+            hasQtWasm = logos-nix ? lib.qtWasmFor;
+            hasRuntimeWasm =
+              (logos-view-module-runtime.packages.${system} or {}) ? qml-runtime-wasm;
+          in
+          if hasProtocolWasm && hasQtWasm && hasRuntimeWasm
+          then import ./tests/test-web-view-variant.nix {
+            inherit pkgs;
+            # mkLogosQmlModule, not mkLogosModule: `web` on a view module is a
+            # ui_qml output, and every real one is built through that entry
+            # point (the iOS view framework lives there for the same reason).
+            mkLogosQmlModule = lib.mkLogosQmlModule;
+            fixturesRoot = ./tests/fixtures;
+          }
+          else pkgs.runCommand "web-view-variant-tests-skipped" { } ''
+            echo "SKIP: web-view-variant — a ui_qml module's \`web\` variant needs"
+            echo "      all three of:"
+            echo "        logos-protocol packages.${system}.logos-protocol-wasm  ${nixpkgs.lib.boolToString hasProtocolWasm}"
+            echo "        logos-nix       lib.qtWasmFor                          ${nixpkgs.lib.boolToString hasQtWasm}"
+            echo "        view-runtime    packages.${system}.qml-runtime-wasm     ${nixpkgs.lib.boolToString hasRuntimeWasm}"
+            echo "      Bump the pins, or run through the workspace flake:"
+            echo "        ws test logos-module-builder --local logos-protocol logos-nix logos-view-module-runtime"
             mkdir -p $out
             echo skipped > $out/result
           '';
