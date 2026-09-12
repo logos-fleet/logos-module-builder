@@ -257,6 +257,57 @@
             src = ./tests/fixtures/web-view-counter;
             configFile = ./tests/fixtures/web-view-counter/metadata.json;
           }).packages.${system};
+
+          # THE SAME FIXTURE UNDER A SECOND NAME, and it has to be a second
+          # BUILD rather than a second copy of the bytes.
+          #
+          # A shell that enforces a live-runtime budget can only be shown doing
+          # it with TWO Downloaded modules, and there is exactly one `ui_qml`
+          # `web` variant in existence. Renaming the built package does not
+          # work: a variant's identity is compiled into its Qt-wasm backend
+          # image, so a page told to publish `web_counter_b` over a `web_counter`
+          # backend answers the container's contract query with nothing and the
+          # load times out -- measured on an iPad simulator, 2026-09-12.
+          #
+          # So the SOURCE is renamed and rebuilt: file names, C++ identifiers,
+          # the .rep and the plugin iid all follow `web_counter` -> the new name
+          # in one pass, which is what keeps the generated replica header and
+          # its include in step. Nothing is edited by hand and there is no second
+          # fixture to keep up to date -- the reason the first one is exported
+          # rather than copied in the first place.
+          renamedWebViewCounter = name:
+            let
+              src = pkgs.runCommand "logos-${name}-src" { } ''
+                cp -r ${./tests/fixtures/web-view-counter} $out
+                chmod -R u+w $out
+                # Contents first, then the file names: a rename that ran first
+                # would leave `#include "web_counter_interface.h"` naming a file
+                # that no longer exists.
+                grep -rl web_counter $out | while read -r f; do
+                  sed -i "s/web_counter/${name}/g" "$f"
+                done
+                # -mindepth 1, or the LAST thing -depth hands back is $out
+                # itself -- whose own name holds `web_counter` -- and the
+                # derivation renames its own output away and produces nothing.
+                find $out -mindepth 1 -depth -name '*web_counter*' | while read -r f; do
+                  mv "$f" "$(dirname "$f")/$(basename "$f" | sed "s/web_counter/${name}/")"
+                done
+                grep -q '"name": "${name}"' $out/metadata.json \
+                  || { echo "error: the rename did not reach metadata.json" >&2; exit 1; }
+              '';
+              # REALISED BEFORE IT IS USED AS A SOURCE, and that is not a
+              # nicety: mkLogosQmlModule finds a module's QML directory with
+              # `builtins.pathExists`, and an unbuilt store path answers false --
+              # so the `web` output would simply be missing, with no error
+              # anywhere. Reading one file out of the tree builds it, and every
+              # pathExists after that sees a directory that is there.
+              realised = builtins.seq (builtins.readFile "${src}/metadata.json") "${src}";
+            in
+            (lib.mkLogosQmlModule {
+              src = realised;
+              configFile = "${realised}/metadata.json";
+            }).packages.${system};
+          webViewCounterB = renamedWebViewCounter "web_counter_b";
         in
         {
           rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";
@@ -303,6 +354,14 @@
         # logos-basecamp's hasWebContainerTest does.
         // nixpkgs.lib.optionalAttrs (webViewCounter ? web) {
           web-view-counter = webViewCounter.web;
+        }
+        # ...AND A SECOND ONE, for a consumer that has to show two Downloaded
+        # modules at once. logos-basecamp's phone Web container enforces a
+        # live-runtime budget of ONE QML runtime, and "showing the second module
+        # released the first's UI page" is not a claim one module can support.
+        # Same gate, same reason.
+        // nixpkgs.lib.optionalAttrs (webViewCounterB ? web) {
+          web-view-counter-b = webViewCounterB.web;
         });
 
       # Also expose as an overlay for convenience
