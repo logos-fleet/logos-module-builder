@@ -249,9 +249,35 @@
       # codegen.rust module can stage it as `../logos-rust-sdk-src` to generate its
       # Cargo.lock against the SAME SDK the builder links, without needing a
       # logos-rust-sdk input in the module's own flake.
-      packages = forAllSystems ({ pkgs, system, ... }: {
+      packages = forAllSystems ({ pkgs, system, ... }:
+        let
+          # Taken ONCE and by name below, because `web` is an output
+          # mkLogosQmlModule DROPS when the pinned inputs cannot produce it.
+          webViewCounter = (lib.mkLogosQmlModule {
+            src = ./tests/fixtures/web-view-counter;
+            configFile = ./tests/fixtures/web-view-counter/metadata.json;
+          }).packages.${system};
+        in
+        {
         rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";
 
+        # THE NATIVE MODULE A `web` VARIANT'S QML CALLS BY NAME, AS A PACKAGE.
+        #
+        # `logos.callModuleAsync("greeter", "greet", ["logos"], cb)` is what the
+        # instrumented variant below does, and proving that reaches a native
+        # module needs one on the far end. Its BARE artifact, so a container
+        # check is one process -- the page, the core and this module -- with no
+        # subprocess host to find and no Qt in the image.
+        #
+        # Exported for the same reason the variant is: wasm/browser-e2e answers
+        # `greeter.greet` from a JavaScript stub and logos-basecamp's
+        # web-container-test loads THIS, and the two assert the same string only
+        # while one fixture is behind both.
+        bare-greeter = (lib.mkLogosModule {
+          src = ./tests/fixtures/bare-greeter;
+          configFile = ./tests/fixtures/bare-greeter/metadata.json;
+        }).packages.${system}.bare;
+        } // nixpkgs.lib.optionalAttrs (webViewCounter ? web) {
         # THE INSTRUMENTED `ui_qml` WEB VARIANT, AS A PACKAGE.
         #
         # tests/fixtures/web-view-counter is the only `web` variant whose QML
@@ -266,10 +292,16 @@
         # fixture in the container's repo would be a second thing to keep in
         # step with the loader, the manifest keys and the runtime's context
         # properties, and the first drift would show up as a container bug.
-        web-view-counter = (lib.mkLogosQmlModule {
-          src = ./tests/fixtures/web-view-counter;
-          configFile = ./tests/fixtures/web-view-counter/metadata.json;
-        }).packages.${system}.web;
+        #
+        # OPTIONAL, BECAUSE THE OUTPUT BEHIND IT IS. mkLogosQmlModule produces
+        # no `web` output unless six things hold of the pins (see webViewFor),
+        # and a consumer's `... or null` cannot soften that: the attribute it
+        # reads HERE exists, so the missing one inside it is an evaluation
+        # error, and taking it unconditionally made every package in a
+        # consumer's flake fail to evaluate mid-pin-rollout. Absent instead, so
+        # a consumer can ask `? web-view-counter` -- which is exactly what
+        # logos-basecamp's hasWebContainerTest does.
+        web-view-counter = webViewCounter.web;
       });
 
       # Also expose as an overlay for convenience
