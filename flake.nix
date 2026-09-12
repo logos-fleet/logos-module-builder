@@ -259,25 +259,25 @@
           }).packages.${system};
         in
         {
-        rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";
+          rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";
 
-        # THE NATIVE MODULE A `web` VARIANT'S QML CALLS BY NAME, AS A PACKAGE.
-        #
-        # `logos.callModuleAsync("greeter", "greet", ["logos"], cb)` is what the
-        # instrumented variant below does, and proving that reaches a native
-        # module needs one on the far end. Its BARE artifact, so a container
-        # check is one process -- the page, the core and this module -- with no
-        # subprocess host to find and no Qt in the image.
-        #
-        # Exported for the same reason the variant is: wasm/browser-e2e answers
-        # `greeter.greet` from a JavaScript stub and logos-basecamp's
-        # web-container-test loads THIS, and the two assert the same string only
-        # while one fixture is behind both.
-        bare-greeter = (lib.mkLogosModule {
-          src = ./tests/fixtures/bare-greeter;
-          configFile = ./tests/fixtures/bare-greeter/metadata.json;
-        }).packages.${system}.bare;
-        } // nixpkgs.lib.optionalAttrs (webViewCounter ? web) {
+          # THE NATIVE MODULE A `web` VARIANT'S QML CALLS BY NAME, AS A PACKAGE.
+          #
+          # `logos.callModuleAsync("greeter", "greet", ["logos"], cb)` is what the
+          # instrumented variant below does, and proving that reaches a native
+          # module needs one on the far end. Its BARE artifact, so a container
+          # check is one process -- the page, the core and this module -- with no
+          # subprocess host to find and no Qt in the image.
+          #
+          # Exported for the same reason the variant is: wasm/browser-e2e answers
+          # `greeter.greet` from a JavaScript stub and logos-basecamp's
+          # web-container-test loads THIS, and the two assert the same string only
+          # while one fixture is behind both.
+          bare-greeter = (lib.mkLogosModule {
+            src = ./tests/fixtures/bare-greeter;
+            configFile = ./tests/fixtures/bare-greeter/metadata.json;
+          }).packages.${system}.bare;
+        }
         # THE INSTRUMENTED `ui_qml` WEB VARIANT, AS A PACKAGE.
         #
         # tests/fixtures/web-view-counter is the only `web` variant whose QML
@@ -301,8 +301,9 @@
         # consumer's flake fail to evaluate mid-pin-rollout. Absent instead, so
         # a consumer can ask `? web-view-counter` -- which is exactly what
         # logos-basecamp's hasWebContainerTest does.
-        web-view-counter = webViewCounter.web;
-      });
+        // nixpkgs.lib.optionalAttrs (webViewCounter ? web) {
+          web-view-counter = webViewCounter.web;
+        });
 
       # Also expose as an overlay for convenience
       overlays.default = final: prev: {
