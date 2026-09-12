@@ -249,8 +249,27 @@
       # codegen.rust module can stage it as `../logos-rust-sdk-src` to generate its
       # Cargo.lock against the SAME SDK the builder links, without needing a
       # logos-rust-sdk input in the module's own flake.
-      packages = forAllSystems ({ pkgs, ... }: {
+      packages = forAllSystems ({ pkgs, system, ... }: {
         rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";
+
+        # THE INSTRUMENTED `ui_qml` WEB VARIANT, AS A PACKAGE.
+        #
+        # tests/fixtures/web-view-counter is the only `web` variant whose QML
+        # reports what it did -- where its button is, when its replica arrived,
+        # what the property change did -- which is what lets anything outside a
+        # canvas assert that a view RENDERED and a click WORKED. Two checks
+        # already need it and neither can reach a fixture: wasm/browser-e2e
+        # takes it as an argument, and a CONTAINER's own check (logos-basecamp's
+        # web-container-test) has to load it as a module.
+        #
+        # Exported rather than copied, deliberately. A second instrumented
+        # fixture in the container's repo would be a second thing to keep in
+        # step with the loader, the manifest keys and the runtime's context
+        # properties, and the first drift would show up as a container bug.
+        web-view-counter = (lib.mkLogosQmlModule {
+          src = ./tests/fixtures/web-view-counter;
+          configFile = ./tests/fixtures/web-view-counter/metadata.json;
+        }).packages.${system}.web;
       });
 
       # Also expose as an overlay for convenience
