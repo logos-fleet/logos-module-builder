@@ -42,6 +42,7 @@
 
 #include "LogosMessagePortTransport.h"
 #include "LogosWebCallRouter.h"
+#include "logos_web_module_call.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -55,6 +56,7 @@
 #include <QObject>
 #include <QRemoteObjectHost>
 #include <QString>
+#include <QTimer>
 
 // logos-protocol's wasm subset: the web transport, and nothing else in it needs
 // Qt (it has none). This image is the one place in the system where the two
@@ -282,13 +284,91 @@ QString errorPayload(const QString& error, const QString& module,
 // name; the runtime image has no protocol client and must not grow one (it is
 // the app's bundled runtime, shared by every module), so the call is remoted to
 // here and this image — which does have a client — makes it.
+//
+// ONE DOOR, TWO CALLERS. The QML above and the module's own C++ backend (through
+// logos_web_module_call.h) reach the container by the same call, with the same
+// token and the same failure modes; only the shape of the answer differs. That
+// is deliberate: a second outbound path would be a second place for the
+// credential rule to be got wrong.
 void dispatchModuleCall(const QString& requestId, const QString& module,
                         const QString& method, const QString& argsJson)
 {
-    if (!g_connection || !g_channel || !g_channel->isOpen()) {
-        g_router->complete(requestId,
-                           errorPayload(QStringLiteral("no host channel"), module, method,
-                                        QStringLiteral("the page has bound no container bridge")));
+    const json parsed = json::parse(argsJson.toStdString(), nullptr, /*allow_exceptions=*/false);
+    QJsonArray args;
+    if (parsed.is_array())
+        args = QJsonDocument::fromJson(QByteArray::fromStdString(parsed.dump())).array();
+
+    logos::web::callModuleAsync(
+        module, method, args,
+        [requestId, module, method](const logos::web::ModuleCallResult& res) {
+            if (!res.ok) {
+                g_router->complete(requestId,
+                                   errorPayload(res.errorCode.isEmpty()
+                                                    ? QStringLiteral("call failed")
+                                                    : res.errorCode,
+                                                module, method, res.error));
+                return;
+            }
+            // A SUCCESS IS THE BARE VALUE, exactly as the desktop bridge
+            // serialises it — `JSON.parse(payload)` in a view is the return
+            // value, and only a failure is an object with `error` in it.
+            //
+            // QJsonDocument cannot serialise a bare scalar, so the value is
+            // wrapped, dumped and unwrapped. A view's payload is a string
+            // either way and the round trip is what keeps a returned `4` a `4`
+            // rather than `[4]`.
+            QJsonArray wrap;
+            wrap.append(res.value);
+            const QByteArray dumped = QJsonDocument(wrap).toJson(QJsonDocument::Compact);
+            g_router->complete(requestId,
+                               QString::fromUtf8(dumped.mid(1, dumped.size() - 2)));
+        });
+}
+
+} // namespace
+
+// ── the second door: logos_web_module_call.h ────────────────────────────────
+//
+// Defined HERE rather than in a file of its own because the connection, the
+// channel and the token store are this image's file statics: a separate
+// translation unit would have to be handed all three, and there is exactly one
+// of each per wasm instance. The header states the contract; this is its only
+// implementation anywhere.
+
+namespace logos {
+namespace web {
+
+bool canCallModules()
+{
+    return g_connection && g_channel && g_channel->isOpen();
+}
+
+void callModuleAsync(const QString& module, const QString& method,
+                     const QJsonArray& args, ModuleCallCallback callback)
+{
+    // POSTED, NOT DELIVERED INLINE. The header promises the callback never runs
+    // before this function returns, and a caller setting itself up around the
+    // call would otherwise have to survive re-entry on the one path — the
+    // failure path — it is least likely to have thought about.
+    const auto fail = [callback](const QString& code, const QString& message) {
+        if (!callback) return;
+        QTimer::singleShot(0, [callback, code, message]() {
+            ModuleCallResult res;
+            res.ok = false;
+            res.errorCode = code;
+            res.error = message;
+            callback(res);
+        });
+    };
+
+    if (!canCallModules()) {
+        fail(QStringLiteral("no host channel"),
+             QStringLiteral("the page has bound no container bridge"));
+        return;
+    }
+    if (module.isEmpty() || method.isEmpty()) {
+        fail(QStringLiteral("INVALID_ARG"),
+             QStringLiteral("a module call needs both a module name and a method name"));
         return;
     }
 
@@ -296,31 +376,47 @@ void dispatchModuleCall(const QString& requestId, const QString& module,
     call.id = g_connection->nextId();
     call.object = module.toStdString();
     call.method = method.toStdString();
+    // The credential the CORE granted this module for that target, and nothing
+    // else. Empty when none was granted, which the target is free to refuse —
+    // this image mints nothing and asserts no identity of its own (ADR 0005).
     call.authToken = g_handler->tokenFor(call.object);
 
-    const json args = json::parse(argsJson.toStdString(), nullptr, /*allow_exceptions=*/false);
-    if (args.is_array())
-        for (const json& a : args)
-            call.args.push_back(jsonToRpcValue(a));
+    for (const QJsonValue& a : args) {
+        // Through the canonical JSON text rather than a QJsonValue -> RpcValue
+        // converter written here: json_mapping.h already owns that mapping for
+        // the whole protocol, and a second one would drift on exactly the cases
+        // (a tagged byte string, a nested map) nobody tests twice.
+        QJsonArray wrap;
+        wrap.append(a);
+        const QByteArray dumped = QJsonDocument(wrap).toJson(QJsonDocument::Compact);
+        const json parsed = json::parse(dumped.toStdString(), nullptr,
+                                        /*allow_exceptions=*/false);
+        call.args.push_back(parsed.is_array() && parsed.size() == 1
+                                ? jsonToRpcValue(parsed[0])
+                                : RpcValue());
+    }
 
-    g_connection->sendCallAsync(std::move(call), [requestId, module, method](ResultMessage res) {
+    g_connection->sendCallAsync(std::move(call), [callback](ResultMessage res) {
+        if (!callback) return;
+        ModuleCallResult out;
+        out.ok = res.ok;
         if (!res.ok) {
-            g_router->complete(requestId,
-                               errorPayload(QString::fromStdString(
-                                                res.errCode.empty() ? "call failed" : res.errCode),
-                                            module, method,
-                                            QString::fromStdString(res.err)));
+            out.errorCode = QString::fromStdString(
+                res.errCode.empty() ? "call failed" : res.errCode);
+            out.error = QString::fromStdString(res.err);
+            callback(out);
             return;
         }
-        // A SUCCESS IS THE BARE VALUE, exactly as the desktop bridge serialises
-        // it — `JSON.parse(payload)` in a view is the return value, and only a
-        // failure is an object with `error` in it.
-        g_router->complete(requestId,
-                           QString::fromStdString(rpcValueToJson(res.value).dump()));
+        QJsonArray wrap;
+        const QByteArray text =
+            QByteArray::fromStdString(json::array({ rpcValueToJson(res.value) }).dump());
+        out.value = QJsonDocument::fromJson(text).array().at(0);
+        callback(out);
     });
 }
 
-} // namespace
+} // namespace web
+} // namespace logos
 
 #ifdef __EMSCRIPTEN__
 

@@ -3,6 +3,18 @@ class WebCounter
     PROP(int count READONLY)
     PROP(QString status READWRITE)
 
+    // The outcome of the last `callPeer`, as JSON: {"ok":…,"value":…} or
+    // {"ok":false,"error":…}. A PROP rather than a return value because the
+    // door behind it is ASYNCHRONOUS and only asynchronous — see
+    // logos_web_module_call.h — so there is nothing to return at call time.
+    PROP(QString lastCall READONLY)
+
     SLOT(void increment())
     SLOT(int add(int a, int b))
+
+    // Ask another module for something, through the container. In this image
+    // that is the second door (logos::web::callModuleAsync); in the desktop
+    // plugin it is refused, which is the fixture's point: the same backend
+    // source compiles both ways and only one of them has a channel.
+    SLOT(void callPeer(QString module, QString method))
 }

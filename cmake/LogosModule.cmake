@@ -1145,7 +1145,13 @@ function(logos_wasm_view_module)
         "${CMAKE_CURRENT_SOURCE_DIR}/generated_code/include"
         "${LOGOS_WEB_RUNTIME_ROOT}/include"
         # The wasm protocol's headers, installed flat by its nix/wasm.nix.
-        "${LOGOS_PROTOCOL_WASM_ROOT}/include")
+        "${LOGOS_PROTOCOL_WASM_ROOT}/include"
+        # THE SECOND DOOR. logos_web_module_call.h is how a backend in this
+        # image calls another module; it is declared beside the host that
+        # implements it, and this is the only build that puts it on an include
+        # path. A desktop plugin including it would not link, which is the
+        # honest answer: the door exists only where the channel does.
+        "${_view_builder_root}/wasm")
 
     foreach(dir ${VWASM_INCLUDE_DIRS})
         target_include_directories(${_VIEW_TARGET} PRIVATE ${dir})

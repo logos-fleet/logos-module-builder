@@ -17,4 +17,8 @@ public:
 public slots:
     void increment() override;
     int add(int a, int b) override;
+
+    // THE SECOND DOOR, exercised. Only the wasm image has one; the desktop
+    // plugin compiles the same source and records that it has not.
+    void callPeer(QString module, QString method) override;
 };
