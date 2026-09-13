@@ -507,6 +507,31 @@
             mkdir -p $out
             echo skipped > $out/result
           '';
+        # Integration test: a `codegen.rust` module's `web` output — the leg
+        # that did not exist until the builder learned to compile a crate for
+        # wasm32-unknown-emscripten and link the archive into the host image.
+        # Its own check rather than more cases in web-variant: what it pins is
+        # the RUST leg (the archive is in the image, and the SDK's storage
+        # barrier works on emscripten), not the host, and a failure should say
+        # which of the two broke.
+        #
+        # Same skip rule and same reason as web-variant above.
+        web-rust-variant =
+          if (logos-protocol.packages.${system} or {}) ? logos-protocol-wasm
+          then import ./tests/test-web-rust-variant.nix {
+            inherit pkgs;
+            mkLogosModule = lib.mkLogosModule;
+            fixturesRoot = ./tests/fixtures;
+          }
+          else pkgs.runCommand "web-rust-variant-tests-skipped" { } ''
+            echo "SKIP: web-rust-variant — the pinned logos-protocol publishes no"
+            echo "      packages.${system}.logos-protocol-wasm, so this repo has"
+            echo "      no \`web\` output to test. Bump the logos-protocol input,"
+            echo "      or run through the workspace flake:"
+            echo "        ws test logos-module-builder --local logos-protocol logos-nix"
+            mkdir -p $out
+            echo skipped > $out/result
+          '';
         # Integration test: the OTHER `web` output — a ui_qml module's QML plus
         # its Qt-for-WebAssembly view backend (ADR 0004, slice 27). The build
         # gates its own bytes; this checks the four files name each other, the

@@ -916,12 +916,76 @@ function(logos_wasm_module)
         # an unlucky catch could swallow, leaving a module that answers nothing
         # and never says why.
         "-sEXIT_RUNTIME=0"
+        # THE STACK, and it is not a tuning knob.
+        #
+        # Emscripten's default is 64 KB. That is enough for the C++ host and the
+        # web transport, and it is NOT enough for a Rust core: k256's ECDSA
+        # signing overflows it, and the keystore's `web` variant therefore
+        # created and stored a key correctly, read it back correctly after a
+        # reload, and died on the first signature. Measured with
+        # -sSTACK_OVERFLOW_CHECK=2:
+        #
+        #   Aborted(stack overflow (Attempt to set SP to 0x0001fee0,
+        #     with stack limits [0x0001ff00 - 0x0002ff00]))
+        #
+        # 4 MB is half of the 8 MB a Rust main thread gets natively -- the
+        # figure the crates in a module's dependency graph were written and
+        # tested against. It is carved out of a 32-bit address space at link
+        # time and costs nothing until touched.
+        "-sSTACK_SIZE=4MB"
+        # ...and when a core does exhaust it, the abort SAYS SO. Without this
+        # the same overflow surfaces as a bare "RuntimeError: memory access out
+        # of bounds" with a wasm-function trace and nothing to read -- which is
+        # how the one above was found, the slow way. Level 1 is the cookie
+        # check, not the per-function instrumentation of level 2.
+        "-sSTACK_OVERFLOW_CHECK=1"
         "-sASSERTIONS=0"
         "-sSINGLE_FILE=1"
     )
 
+    # THE MODULE'S CORE, when it is not the C++ compiled above.
+    #
+    # A `codegen.rust` module's whole module-impl C ABI lives in its crate, so
+    # without this the image links, exports nothing the host can drive, and dies
+    # at the first dispatch -- or, more usually, fails the link naming
+    # logos_module_dispatch, three steps from "there is no Rust in this build".
+    # The builder compiles the crate for wasm32-unknown-emscripten and stages
+    # the archive in lib/ (buildWebModule's postPatch), exactly as the Bare path
+    # stages a cross archive.
+    #
+    # WHOLE-ARCHIVE, for the reason logos_bare_module() states: the install hook
+    # (`logos_module_install`) is reached only through a symbol reference the
+    # C++ half does not make, so lazy archive extraction would leave the module
+    # uninstalled in an image that otherwise looks correct. wasm-ld takes the
+    # GNU spelling.
+    set(_WASM_STATIC_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+    set(_WASM_WHOLE_ARCHIVES "")
+    foreach(_archive_name IN LISTS LOGOS_MODULE_RUST_STATIC_LIBS)
+        if(_archive_name STREQUAL "")
+            continue()
+        endif()
+        # NO_CMAKE_FIND_ROOT_PATH: the archive is in the SOURCE TREE, and the
+        # Emscripten toolchain re-roots find_library at CMAKE_FIND_ROOT_PATH --
+        # the same trap, and the same fix, the Bare cross leg documents.
+        find_library(_LOGOS_WASM_RUST_${_archive_name}
+            NAMES lib${_archive_name}.a ${_archive_name}.a ${_archive_name}
+            PATHS ${_WASM_STATIC_LIB_DIR} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+        if(NOT _LOGOS_WASM_RUST_${_archive_name})
+            message(FATAL_ERROR
+                "logos_wasm_module(${WASM_NAME}): Rust static library "
+                "'${_archive_name}' was not found in ${_WASM_STATIC_LIB_DIR}. "
+                "The builder stages the wasm32 archive there before the link; "
+                "this usually means the crate's wasm compile did not run.")
+        endif()
+        list(APPEND _WASM_WHOLE_ARCHIVES ${_LOGOS_WASM_RUST_${_archive_name}})
+    endforeach()
+
     add_executable(${WASM_NAME}_wasm $<TARGET_OBJECTS:${_WASM_OBJS}>)
     target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_LOGOS_PROTOCOL_WASM_LIB} ${WASM_LINK_LIBRARIES})
+    foreach(_archive IN LISTS _WASM_WHOLE_ARCHIVES)
+        target_link_options(${WASM_NAME}_wasm PRIVATE
+            -Wl,--whole-archive ${_archive} -Wl,--no-whole-archive)
+    endforeach()
     target_link_options(${WASM_NAME}_wasm PRIVATE ${_WASM_LINK_FLAGS})
     set_target_properties(${WASM_NAME}_wasm PROPERTIES
         SUFFIX ".js"
