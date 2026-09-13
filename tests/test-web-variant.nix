@@ -22,6 +22,14 @@
 #     independently, and a mismatch between the glue filename the worker imports
 #     and the one the build emitted is a module that never loads, with no build
 #     error anywhere.
+#   * THE MODULE'S STORE SURVIVES ITS IMAGE. An emscripten image HAS a
+#     filesystem, so a `web` variant that persists nothing durable looks
+#     identical to one that does until the page reloads. Driven across two
+#     images, which is what a reload is to a module's store: the first writes
+#     and commits, the second reads it back. And the fallback is asserted too --
+#     with nothing durable mounted the image SAYS so and `remember` refuses to
+#     claim a durability it does not have, which is the whole difference between
+#     a module that knows it lost the data and one that does not.
 #   * A PANIC IS A MODULE FAILURE AND NOT A PAGE CRASH. The counter's `panic`
 #     method runs __builtin_trap() -- what a Rust core built `panic = "abort"`
 #     compiles a panic to on wasm32. Driven three ways: the image traps rather
@@ -113,6 +121,9 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   // logos-protocol's MessageType -- so nothing here stands in for the
   // transport, only for the browser.
   const factory = require('./host.js');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
 
   const CALL = 1, RESULT = 2, TOKEN = 6, METHODS = 7, METHODS_RESULT = 8;
 
@@ -123,10 +134,10 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   };
 
   // One wasm image, with its port wired to an array.
-  async function spawn() {
+  async function spawn(opts = {}) {
     const heard = [];
     let hello = null;
-    const mod = await factory({
+    const mod = await factory(Object.assign({
       logosOut: (text) => {
         let msg;
         try { msg = JSON.parse(text); } catch (e) { heard.push({ raw: text }); return; }
@@ -134,7 +145,7 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
         heard.push(msg);
       },
       print: () => {}, printErr: () => {},
-    });
+    }, opts));
     const deliver = mod.cwrap('logos_wasm_deliver', null, ['string']);
     return {
       heard,
@@ -174,7 +185,7 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     const methodsResult = a.heard.find((m) => m.type === METHODS_RESULT);
     if (!methodsResult || !methodsResult.payload.ok) fail('the image answered no Methods', a.heard);
     const names = methodsResult.payload.methods.map((m) => m.name).sort();
-    for (const want of ['add', 'current', 'increment', 'reset']) {
+    for (const want of ['add', 'current', 'increment', 'recall', 'remember', 'reset']) {
       if (!names.includes(want)) fail('the published interface is missing ' + want + ': ' + names);
     }
 
@@ -250,6 +261,81 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
       fail("a second image sees the first image's counter state", b.heard);
     }
     console.log("PASS: a second Wasm host has its own token store and its own state");
+
+    // ── THE MODULE'S STORE SURVIVES ITS IMAGE ───────────────────────────────
+    //
+    // An emscripten image HAS a filesystem, which is why this needs asserting
+    // at all: without the host's mount every write below succeeds, reads back
+    // correctly for the life of the image, and is gone — the exact shape of a
+    // `web` variant that looks right in a demo and loses a user's key on the
+    // next page load. So the property is stated across two images, which is
+    // what a page reload is to a module's store.
+    //
+    // NODEFS stands in for IndexedDB. It is not a weaker statement about the
+    // thing under test: the mount, the populate-before-main, the persistence
+    // path in the module context and the `logos_storage_commit` the module
+    // calls are one code path with the backend chosen at the bottom of it
+    // (wasm/logos_wasm_storage.js). IndexedDB itself needs a browser, and what
+    // a browser would add here is a test of IndexedDB.
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'logos-web-store-'));
+
+    const writer = await spawn({ logosStorageHostDir: store });
+    const writerHello = writer.hello();
+    if (!writerHello || writerHello.storage !== 'nodefs') {
+      fail('the image did not mount the store it was given: ' + JSON.stringify(writerHello));
+    }
+    if (!writerHello.storagePath) fail('the image reported no persistence path', writerHello);
+
+    writer.send(CALL, { id: 50, authToken: "", object: 'bare_counter',
+                        method: 'remember', args: ['a key survives a reload'] });
+    const wrote = writer.result(50);
+    if (!wrote || !wrote.payload.ok || wrote.payload.value !== true) {
+      fail('remember() did not report a durable write', writer.heard);
+    }
+
+    // It reached the HOST filesystem, not just the image's view of one.
+    const onDisk = fs.readdirSync(store);
+    if (!onDisk.includes('note.txt')) {
+      fail('nothing reached the durable store: ' + JSON.stringify(onDisk));
+    }
+
+    // ...and a SECOND image, which is what the page after a reload is, reads it
+    // back. The first image's linear memory is not shared with it; the only
+    // path from one to the other is the store.
+    const reader = await spawn({ logosStorageHostDir: store });
+    reader.send(CALL, { id: 51, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
+    const recalled = reader.result(51);
+    if (!recalled || !recalled.payload.ok || recalled.payload.value !== 'a key survives a reload') {
+      fail('a second image did not recall what the first one stored', reader.heard);
+    }
+    console.log('PASS: a write committed by one image is read back by the next');
+
+    // AND THE FALLBACK IS HONEST. With no host directory and no IndexedDB —
+    // which is plain node, and is also an embedded webview with storage
+    // disabled — the image still runs and still has a filesystem, so the write
+    // SUCCEEDS at the language level. `remember` returns false anyway, because
+    // logos_storage_commit reported that nothing durable is mounted. That
+    // refusal is the whole difference between a module that knows it lost the
+    // data and one that does not.
+    const noStore = await spawn();
+    const noStoreHello = noStore.hello();
+    if (!noStoreHello || noStoreHello.storage !== 'memfs') {
+      fail('an image with no durable store did not say so: ' + JSON.stringify(noStoreHello));
+    }
+    noStore.send(CALL, { id: 60, authToken: "", object: 'bare_counter',
+                         method: 'remember', args: ['this cannot last'] });
+    const ephemeral = noStore.result(60);
+    if (!ephemeral || !ephemeral.payload.ok || ephemeral.payload.value !== false) {
+      fail('a write with no durable store was reported as durable', noStore.heard);
+    }
+    // ...and it is still readable within the image, which is what makes the
+    // fallback usable for the life of a page rather than merely broken.
+    noStore.send(CALL, { id: 61, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
+    const stillThere = noStore.result(61);
+    if (!stillThere || stillThere.payload.value !== 'this cannot last') {
+      fail('the memfs fallback did not even hold the write in-image', noStore.heard);
+    }
+    console.log('PASS: with no durable store the image says so and refuses to claim durability');
 
     // ── A PANIC IS A TRAP, AND A TRAP LEAVES THE IMAGE DEAD ─────────────────
     //

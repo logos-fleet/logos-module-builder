@@ -774,11 +774,21 @@ function(logos_wasm_module)
     if(NOT _wasm_builder_root)
         set(_wasm_builder_root "$ENV{LOGOS_MODULE_BUILDER_ROOT}")
     endif()
+    # The host main first, so a root that is simply wrong says so rather than
+    # blaming whichever of the two files is checked earliest.
     if(NOT _wasm_builder_root OR NOT EXISTS "${_wasm_builder_root}/wasm/logos_wasm_host.cpp")
         message(FATAL_ERROR
             "logos_wasm_module(${WASM_NAME}): wasm/logos_wasm_host.cpp was not "
             "found. LOGOS_MODULE_BUILDER_ROOT must name this repo's root; it "
             "resolved to '${_wasm_builder_root}'.")
+    endif()
+    if(NOT EXISTS "${_wasm_builder_root}/wasm/logos_wasm_storage.js")
+        message(FATAL_ERROR
+            "logos_wasm_module(${WASM_NAME}): wasm/logos_wasm_storage.js was not "
+            "found. It is the --pre-js that mounts the module's durable store; "
+            "without it every write inside the webview is lost on the next page "
+            "load, silently. LOGOS_MODULE_BUILDER_ROOT resolved to "
+            "'${_wasm_builder_root}'.")
     endif()
 
     foreach(pkg ${WASM_FIND_PACKAGES})
@@ -887,8 +897,20 @@ function(logos_wasm_module)
         # glue usable from a page during debugging.
         "-sENVIRONMENT=web,worker,node"
         "-sALLOW_MEMORY_GROWTH=1"
-        "-sEXPORTED_FUNCTIONS=['_main','_logos_wasm_deliver','_logos_wasm_ready_ms']"
-        "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
+        "-sEXPORTED_FUNCTIONS=['_main','_logos_wasm_deliver','_logos_wasm_ready_ms','_logos_storage_commit','_malloc']"
+        # Everything after 'cwrap' is named from JS the linker does not scan:
+        # FS/IDBFS/NODEFS and the run-dependency pair from the --pre-js below,
+        # lengthBytesUTF8/stringToUTF8 from the EM_JS bodies in
+        # wasm/logos_wasm_host.cpp. Without them here the JS library symbols are
+        # dropped and the mount fails at run time with "FS is not defined",
+        # inside preRun, where nothing reports it.
+        "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','FS','IDBFS','NODEFS','addRunDependency','removeRunDependency','lengthBytesUTF8','stringToUTF8']"
+        # The durable store: IDBFS is the shipping backend (the browser's
+        # IndexedDB), NODEFS is what lets a test drive persistence without a
+        # browser. Both are JS libraries and cost nothing in the wasm image.
+        "-lidbfs.js"
+        "-lnodefs.js"
+        "--pre-js" "${_wasm_builder_root}/wasm/logos_wasm_storage.js"
         # A trap must kill the Worker, which the loader page reports as a module
         # failure. Without this emscripten's abort() throws a JS exception that
         # an unlucky catch could swallow, leaving a module that answers nothing
