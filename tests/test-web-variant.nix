@@ -121,6 +121,9 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   // logos-protocol's MessageType -- so nothing here stands in for the
   // transport, only for the browser.
   const factory = require('./host.js');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
 
   const CALL = 1, RESULT = 2, TOKEN = 6, METHODS = 7, METHODS_RESULT = 8;
 
@@ -131,7 +134,7 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
   };
 
   // One wasm image, with its port wired to an array.
-  async function spawn(opts) {
+  async function spawn(opts = {}) {
     const heard = [];
     let hello = null;
     const mod = await factory(Object.assign({
@@ -142,7 +145,7 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
         heard.push(msg);
       },
       print: () => {}, printErr: () => {},
-    }, opts || {}));
+    }, opts));
     const deliver = mod.cwrap('logos_wasm_deliver', null, ['string']);
     return {
       heard,
@@ -274,23 +277,20 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     // calls are one code path with the backend chosen at the bottom of it
     // (wasm/logos_wasm_storage.js). IndexedDB itself needs a browser, and what
     // a browser would add here is a test of IndexedDB.
-    const os = require('os');
-    const fs = require('fs');
-    const path = require('path');
     const store = fs.mkdtempSync(path.join(os.tmpdir(), 'logos-web-store-'));
 
-    const e = await spawn({ logosStorageHostDir: store });
-    const eHello = e.hello();
-    if (!eHello || eHello.storage !== 'nodefs') {
-      fail('the image did not mount the store it was given: ' + JSON.stringify(eHello));
+    const writer = await spawn({ logosStorageHostDir: store });
+    const writerHello = writer.hello();
+    if (!writerHello || writerHello.storage !== 'nodefs') {
+      fail('the image did not mount the store it was given: ' + JSON.stringify(writerHello));
     }
-    if (!eHello.storagePath) fail('the image reported no persistence path', eHello);
+    if (!writerHello.storagePath) fail('the image reported no persistence path', writerHello);
 
-    e.send(CALL, { id: 50, authToken: "", object: 'bare_counter',
-                   method: 'remember', args: ['a key survives a reload'] });
-    const wrote = e.result(50);
+    writer.send(CALL, { id: 50, authToken: "", object: 'bare_counter',
+                        method: 'remember', args: ['a key survives a reload'] });
+    const wrote = writer.result(50);
     if (!wrote || !wrote.payload.ok || wrote.payload.value !== true) {
-      fail('remember() did not report a durable write', e.heard);
+      fail('remember() did not report a durable write', writer.heard);
     }
 
     // It reached the HOST filesystem, not just the image's view of one.
@@ -302,11 +302,11 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     // ...and a SECOND image, which is what the page after a reload is, reads it
     // back. The first image's linear memory is not shared with it; the only
     // path from one to the other is the store.
-    const f = await spawn({ logosStorageHostDir: store });
-    f.send(CALL, { id: 51, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
-    const recalled = f.result(51);
+    const reader = await spawn({ logosStorageHostDir: store });
+    reader.send(CALL, { id: 51, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
+    const recalled = reader.result(51);
     if (!recalled || !recalled.payload.ok || recalled.payload.value !== 'a key survives a reload') {
-      fail('a second image did not recall what the first one stored', f.heard);
+      fail('a second image did not recall what the first one stored', reader.heard);
     }
     console.log('PASS: a write committed by one image is read back by the next');
 
@@ -317,23 +317,23 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     // logos_storage_commit reported that nothing durable is mounted. That
     // refusal is the whole difference between a module that knows it lost the
     // data and one that does not.
-    const g = await spawn();
-    const gHello = g.hello();
-    if (!gHello || gHello.storage !== 'memfs') {
-      fail('an image with no durable store did not say so: ' + JSON.stringify(gHello));
+    const noStore = await spawn();
+    const noStoreHello = noStore.hello();
+    if (!noStoreHello || noStoreHello.storage !== 'memfs') {
+      fail('an image with no durable store did not say so: ' + JSON.stringify(noStoreHello));
     }
-    g.send(CALL, { id: 60, authToken: "", object: 'bare_counter',
-                   method: 'remember', args: ['this cannot last'] });
-    const ephemeral = g.result(60);
+    noStore.send(CALL, { id: 60, authToken: "", object: 'bare_counter',
+                         method: 'remember', args: ['this cannot last'] });
+    const ephemeral = noStore.result(60);
     if (!ephemeral || !ephemeral.payload.ok || ephemeral.payload.value !== false) {
-      fail('a write with no durable store was reported as durable', g.heard);
+      fail('a write with no durable store was reported as durable', noStore.heard);
     }
     // ...and it is still readable within the image, which is what makes the
     // fallback usable for the life of a page rather than merely broken.
-    g.send(CALL, { id: 61, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
-    const stillThere = g.result(61);
+    noStore.send(CALL, { id: 61, authToken: "", object: 'bare_counter', method: 'recall', args: [] });
+    const stillThere = noStore.result(61);
     if (!stillThere || stillThere.payload.value !== 'this cannot last') {
-      fail('the memfs fallback did not even hold the write in-image', g.heard);
+      fail('the memfs fallback did not even hold the write in-image', noStore.heard);
     }
     console.log('PASS: with no durable store the image says so and refuses to claim durability');
 

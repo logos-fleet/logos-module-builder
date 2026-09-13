@@ -104,8 +104,9 @@ EM_JS(void, logos_wasm_post, (const char* text), {
 // this glue with --pre-js; see that file for why the mount cannot be done from
 // here (it has to be populated before main runs, and the populate is async).
 //
-// This side is two EM_JS calls and one export, because what the module needs is
-// a path and a barrier and nothing else.
+// This side is three EM_JS calls -- the path, the backend's name, the barrier --
+// and one export, because what the module needs is a path and a barrier and
+// nothing else.
 EM_JS(char*, logos_storage_dir_js, (), {
     // Double quotes throughout: an EM_JS body is a macro argument, so the C
     // preprocessor tokenises it first and reads a JS '' as an empty character
