@@ -943,6 +943,9 @@ function(logos_wasm_module)
         "-sSINGLE_FILE=1"
     )
 
+    add_executable(${WASM_NAME}_wasm $<TARGET_OBJECTS:${_WASM_OBJS}>)
+    target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_LOGOS_PROTOCOL_WASM_LIB} ${WASM_LINK_LIBRARIES})
+
     # THE MODULE'S CORE, when it is not the C++ compiled above.
     #
     # A `codegen.rust` module's whole module-impl C ABI lives in its crate, so
@@ -959,33 +962,27 @@ function(logos_wasm_module)
     # uninstalled in an image that otherwise looks correct. wasm-ld takes the
     # GNU spelling.
     set(_WASM_STATIC_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-    set(_WASM_WHOLE_ARCHIVES "")
-    foreach(_archive_name IN LISTS LOGOS_MODULE_RUST_STATIC_LIBS)
-        if(_archive_name STREQUAL "")
+    foreach(_rustlib IN LISTS LOGOS_MODULE_RUST_STATIC_LIBS)
+        if(_rustlib STREQUAL "")
             continue()
         endif()
         # NO_CMAKE_FIND_ROOT_PATH: the archive is in the SOURCE TREE, and the
         # Emscripten toolchain re-roots find_library at CMAKE_FIND_ROOT_PATH --
         # the same trap, and the same fix, the Bare cross leg documents.
-        find_library(_LOGOS_WASM_RUST_${_archive_name}
-            NAMES lib${_archive_name}.a ${_archive_name}.a ${_archive_name}
+        find_library(_LOGOS_WASM_RUST_${_rustlib}
+            NAMES lib${_rustlib}.a ${_rustlib}.a ${_rustlib}
             PATHS ${_WASM_STATIC_LIB_DIR} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-        if(NOT _LOGOS_WASM_RUST_${_archive_name})
+        if(NOT _LOGOS_WASM_RUST_${_rustlib})
             message(FATAL_ERROR
                 "logos_wasm_module(${WASM_NAME}): Rust static library "
-                "'${_archive_name}' was not found in ${_WASM_STATIC_LIB_DIR}. "
+                "'${_rustlib}' was not found in ${_WASM_STATIC_LIB_DIR}. "
                 "The builder stages the wasm32 archive there before the link; "
                 "this usually means the crate's wasm compile did not run.")
         endif()
-        list(APPEND _WASM_WHOLE_ARCHIVES ${_LOGOS_WASM_RUST_${_archive_name}})
+        target_link_options(${WASM_NAME}_wasm PRIVATE
+            -Wl,--whole-archive ${_LOGOS_WASM_RUST_${_rustlib}} -Wl,--no-whole-archive)
     endforeach()
 
-    add_executable(${WASM_NAME}_wasm $<TARGET_OBJECTS:${_WASM_OBJS}>)
-    target_link_libraries(${WASM_NAME}_wasm PRIVATE ${_LOGOS_PROTOCOL_WASM_LIB} ${WASM_LINK_LIBRARIES})
-    foreach(_archive IN LISTS _WASM_WHOLE_ARCHIVES)
-        target_link_options(${WASM_NAME}_wasm PRIVATE
-            -Wl,--whole-archive ${_archive} -Wl,--no-whole-archive)
-    endforeach()
     target_link_options(${WASM_NAME}_wasm PRIVATE ${_WASM_LINK_FLAGS})
     set_target_properties(${WASM_NAME}_wasm PROPERTIES
         SUFFIX ".js"

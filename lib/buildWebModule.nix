@@ -123,7 +123,8 @@ in pkgs.stdenv.mkDerivation {
     # cannot have Qt.
     cmake .. -GNinja ${lib.escapeShellArgs pkgs.logosWasmCmakeFlags} \
       -DLOGOS_MODULE_WEB=ON \
-      -DCMAKE_BUILD_TYPE=Release ${rustStaticLibsFlag} \
+      ${rustStaticLibsFlag} \
+      -DCMAKE_BUILD_TYPE=Release \
       -DLOGOS_CPP_SDK_ROOT=${logosSdk} \
       -DLOGOS_PROTOCOL_ROOT=${logosProtocolWasm} \
       -DLOGOS_PROTOCOL_WASM_ROOT=${logosProtocolWasm} \

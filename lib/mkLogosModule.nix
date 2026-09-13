@@ -678,7 +678,7 @@ let
       # needs a newer rustc gets the same rustc for both of its targets. A
       # module that pins none gets the overlay's current stable, which moves
       # only with this repo's flake.lock.
-      rustWasmToolchain =
+      rustWasmPlatform =
         if rust-overlay == null then null
         else
           let
@@ -687,17 +687,8 @@ let
               if config.nix_rust.toolchain != null
               then bpkgs.rust-bin.stable.${config.nix_rust.toolchain}
               else bpkgs.rust-bin.stable.latest;
-          in {
-            inherit bpkgs;
             toolchain = channel.default.override { targets = [ rustWasmTarget ]; };
-          };
-
-      rustWasmPlatform =
-        if rustWasmToolchain == null then null
-        else rustWasmToolchain.bpkgs.makeRustPlatform {
-          cargo = rustWasmToolchain.toolchain;
-          rustc = rustWasmToolchain.toolchain;
-        };
+          in bpkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
 
       # Null -- and the `web` output absent for a Rust module -- when the
       # builder has no rust-overlay input. Same rule as the missing wasm
