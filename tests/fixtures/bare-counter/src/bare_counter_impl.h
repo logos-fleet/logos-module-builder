@@ -7,6 +7,7 @@
 // (for a no-Qt host). The Bare artifact is that second one, alone.
 
 #include <cstdint>
+#include <string>
 
 #include <logos_module_context.h>
 
@@ -39,6 +40,25 @@ public:
     // the one being tested. On a NATIVE host it is SIGILL, which is the same
     // statement in that host's terms.
     void panic();
+
+    // PERSISTENCE, and the only pair here that touches the module's own store.
+    //
+    // A module that writes with the ordinary language runtime is correct on a
+    // desktop host and, inside a Wasm host, correct until the page reloads:
+    // emscripten gives the image a filesystem, so the write succeeds and MEMFS
+    // dies with the image. The two halves of the fix are the host's
+    // (`wasm/logos_wasm_storage.js` mounts something durable and stamps the
+    // path into the module context) and the module's (`logos_storage_commit`,
+    // which is `logos_rust_sdk::storage::commit` for a Rust core). This pair is
+    // what a test drives to prove both: `remember` writes and commits,
+    // `recall` reads, and the criterion is that a SECOND image over the same
+    // store recalls what the first one remembered.
+    //
+    // False / empty rather than a throw when there is no store: an honest
+    // "nothing persisted" is what the caller can act on, and it is exactly what
+    // the pre-js's memfs fallback produces.
+    bool remember(const std::string& text);
+    std::string recall();
 
 logos_events:
     // The counter's one event, and the reason it has one: the Native container

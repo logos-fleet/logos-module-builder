@@ -46,6 +46,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <set>
@@ -95,6 +96,46 @@ EM_JS(void, logos_wasm_post, (const char* text), {
         console.error('logos-wasm-host: no message port (no postMessage, no Module.logosOut)');
     }
 });
+
+// ── the durable store ───────────────────────────────────────────────────────
+//
+// The image's persistence path and the barrier that makes writes under it
+// survive the page. Both halves live in wasm/logos_wasm_storage.js, linked into
+// this glue with --pre-js; see that file for why the mount cannot be done from
+// here (it has to be populated before main runs, and the populate is async).
+//
+// This side is two EM_JS calls and one export, because what the module needs is
+// a path and a barrier and nothing else.
+EM_JS(char*, logos_storage_dir_js, (), {
+    // Double quotes throughout: an EM_JS body is a macro argument, so the C
+    // preprocessor tokenises it first and reads a JS '' as an empty character
+    // constant (-Winvalid-pp-token).
+    var dir = Module["logosStorageDir"] || "";
+    var len = lengthBytesUTF8(dir) + 1;
+    var buf = _malloc(len);
+    stringToUTF8(dir, buf, len);
+    return buf;
+});
+
+EM_JS(char*, logos_storage_backend_js, (), {
+    var name = Module["logosStorageBackend"] || "memfs";
+    var len = lengthBytesUTF8(name) + 1;
+    var buf = _malloc(len);
+    stringToUTF8(name, buf, len);
+    return buf;
+});
+
+EM_JS(int, logos_storage_commit_js, (), {
+    return Module["logosStorageCommit"] ? Module["logosStorageCommit"]() : -1;
+});
+
+std::string takeJsString(char* owned)
+{
+    if (!owned) return {};
+    std::string s(owned);
+    free(owned);
+    return s;
+}
 
 class WorkerPortChannel : public logos::web::IMessageChannel {
 public:
@@ -388,6 +429,25 @@ void logos_wasm_deliver(const char* text)
 EMSCRIPTEN_KEEPALIVE
 double logos_wasm_ready_ms(void) { return g_readyMs; }
 
+// THE DURABILITY BARRIER, as the module's core sees it.
+//
+// `logos_rust_sdk::storage::commit` (and its C++ equivalents) call this by
+// name: on emscripten a write is not durable until the image's filesystem has
+// been written back to the browser's IndexedDB, and nothing else in the stack
+// knows to ask. Exported by name so a module core compiled in a separate
+// translation unit -- or a separate LANGUAGE -- links against it.
+//
+//    0  handed over; the write-back is in flight
+//   -1  there is no durable store in this environment (see the pre-js)
+//   >0  the PREVIOUS write-back failed
+//
+// It cannot wait for the write-back: FS.syncfs finishes on the browser's event
+// loop and this image is built without Asyncify. That is why a failure is
+// reported by the NEXT call rather than by the one that caused it -- late, but
+// never dropped.
+EMSCRIPTEN_KEEPALIVE
+int logos_storage_commit(void) { return logos_storage_commit_js(); }
+
 } // extern "C"
 
 int main()
@@ -397,11 +457,21 @@ int main()
     static WasmModuleProvider provider;
 
     // The module's context, before the first dispatch, as the ABI requires.
-    // There is no filesystem to persist into: emscripten's MEMFS is the image's
-    // own memory and dies with the Worker, so an honest empty path is better
-    // than one that silently loses data. A persistent web variant reaches
-    // storage through the page, in a later slice.
-    logos_module_set_context(("/logos/" + kModuleName).c_str(), kModuleName.c_str(), "");
+    //
+    // THE PERSISTENCE PATH IS REAL NOW. It used to be empty, with the comment
+    // that MEMFS is the image's own memory and an honest empty path beats one
+    // that silently loses data. Both halves of that are still true and neither
+    // is the situation: the pre-js has mounted a durable filesystem at this
+    // path and populated it from IndexedDB before this line ran, so a module's
+    // on_context_ready reads its own previous state exactly as it does on a
+    // desktop host. What the module still owes is the barrier
+    // (`logos_storage_commit`), and where there is nothing durable to mount the
+    // barrier is what says so -- the path stays usable for the life of the
+    // page, which is strictly more than an empty one gave.
+    const std::string storageDir = takeJsString(logos_storage_dir_js());
+    const std::string storageBackend = takeJsString(logos_storage_backend_js());
+    logos_module_set_context(("/logos/" + kModuleName).c_str(), kModuleName.c_str(),
+                             storageDir.c_str());
     logos_module_set_emit_callback(&emitTrampoline, &provider);
 
     g_channel = std::make_shared<WorkerPortChannel>();
@@ -421,10 +491,16 @@ int main()
     hello["logosWasmHost"] = kModuleName;
     hello["readyMs"] = g_readyMs;
     hello["protocol"] = logos_module_get_protocol_version();
+    // WHICH STORE THIS IMAGE GOT. A `web` variant that quietly fell back to
+    // MEMFS behaves identically until the page is reloaded, so the regime is
+    // announced rather than left to be discovered: the loader page logs it, and
+    // a test can assert it.
+    hello["storage"] = storageBackend;
+    hello["storagePath"] = storageDir;
     logos_wasm_post(hello.dump().c_str());
 
-    printf("logos-wasm-host: %s serving, ready in %.1f ms\n",
-           kModuleName.c_str(), g_readyMs);
+    printf("logos-wasm-host: %s serving, ready in %.1f ms (storage: %s at %s)\n",
+           kModuleName.c_str(), g_readyMs, storageBackend.c_str(), storageDir.c_str());
     fflush(stdout);
 
     // main() RETURNS and the runtime STAYS UP. Without this emscripten runs
