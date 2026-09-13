@@ -297,6 +297,41 @@ std::shared_ptr<PageChannel> g_channel;
 std::shared_ptr<logos::web::WebRpcConnection> g_connection;
 ViewHostHandler* g_handler = nullptr;
 
+// ── one bare JSON value, across the two JSON libraries in this image ─────────
+//
+// QJsonDocument can neither serialise nor parse a value that is not an object
+// or an array, and every value crossing the door is a BARE one: a call's
+// argument, a reply's result, a view's payload. So each conversion wraps in a
+// one-element array and unwraps after — which is also what keeps a returned
+// `4` a `4` rather than `[4]`.
+//
+// The nlohmann half goes through the canonical JSON text rather than a
+// QJsonValue <-> RpcValue converter written here: json_mapping.h already owns
+// that mapping for the whole protocol, and a second one would drift on exactly
+// the cases (a tagged byte string, a nested map) nobody tests twice.
+
+QString bareJsonText(const QJsonValue& value)
+{
+    QJsonArray wrap;
+    wrap.append(value);
+    const QByteArray dumped = QJsonDocument(wrap).toJson(QJsonDocument::Compact);
+    return QString::fromUtf8(dumped.mid(1, dumped.size() - 2));
+}
+
+// Discarded when the text is not JSON this image can carry, which the caller
+// has to decide about — there is no RpcValue that means "unrepresentable".
+json toProtocolJson(const QJsonValue& value)
+{
+    return json::parse(bareJsonText(value).toStdString(), nullptr,
+                       /*allow_exceptions=*/false);
+}
+
+QJsonValue fromProtocolJson(const json& value)
+{
+    const QByteArray text = QByteArray::fromStdString(json::array({ value }).dump());
+    return QJsonDocument::fromJson(text).array().at(0);
+}
+
 // The error envelope `logos.callModuleAsync`'s callback reads. Same shape as
 // LogosQmlBridge's on the desktop and LogosWebPayload.h's in the runtime, so a
 // view moved between containers keeps working: a failure has `error`, a success
@@ -326,13 +361,10 @@ QString errorPayload(const QString& error, const QString& module,
 void dispatchModuleCall(const QString& requestId, const QString& module,
                         const QString& method, const QString& argsJson)
 {
-    const json parsed = json::parse(argsJson.toStdString(), nullptr, /*allow_exceptions=*/false);
-    QJsonArray args;
-    if (parsed.is_array())
-        args = QJsonDocument::fromJson(QByteArray::fromStdString(parsed.dump())).array();
-
+    // Empty when `argsJson` is not a JSON array, which is a call with no
+    // arguments — the same thing the router sends for one.
     logos::web::callModuleAsync(
-        module, method, args,
+        module, method, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
         [requestId, module, method](const logos::web::ModuleCallResult& res) {
             if (!res.ok) {
                 g_router->complete(requestId,
@@ -345,16 +377,7 @@ void dispatchModuleCall(const QString& requestId, const QString& module,
             // A SUCCESS IS THE BARE VALUE, exactly as the desktop bridge
             // serialises it — `JSON.parse(payload)` in a view is the return
             // value, and only a failure is an object with `error` in it.
-            //
-            // QJsonDocument cannot serialise a bare scalar, so the value is
-            // wrapped, dumped and unwrapped. A view's payload is a string
-            // either way and the round trip is what keeps a returned `4` a `4`
-            // rather than `[4]`.
-            QJsonArray wrap;
-            wrap.append(res.value);
-            const QByteArray dumped = QJsonDocument(wrap).toJson(QJsonDocument::Compact);
-            g_router->complete(requestId,
-                               QString::fromUtf8(dumped.mid(1, dumped.size() - 2)));
+            g_router->complete(requestId, bareJsonText(res.value));
         });
 }
 
@@ -420,18 +443,8 @@ void callModuleAsync(const QString& module, const QString& method,
     call.authToken = g_handler->tokenFor(call.object);
 
     for (const QJsonValue& a : args) {
-        // Through the canonical JSON text rather than a QJsonValue -> RpcValue
-        // converter written here: json_mapping.h already owns that mapping for
-        // the whole protocol, and a second one would drift on exactly the cases
-        // (a tagged byte string, a nested map) nobody tests twice.
-        QJsonArray wrap;
-        wrap.append(a);
-        const QByteArray dumped = QJsonDocument(wrap).toJson(QJsonDocument::Compact);
-        const json parsed = json::parse(dumped.toStdString(), nullptr,
-                                        /*allow_exceptions=*/false);
-        call.args.push_back(parsed.is_array() && parsed.size() == 1
-                                ? jsonToRpcValue(parsed[0])
-                                : RpcValue());
+        const json arg = toProtocolJson(a);
+        call.args.push_back(arg.is_discarded() ? RpcValue() : jsonToRpcValue(arg));
     }
 
     g_connection->sendCallAsync(std::move(call), [callback](ResultMessage res) {
@@ -445,10 +458,7 @@ void callModuleAsync(const QString& module, const QString& method,
             callback(out);
             return;
         }
-        QJsonArray wrap;
-        const QByteArray text =
-            QByteArray::fromStdString(json::array({ rpcValueToJson(res.value) }).dump());
-        out.value = QJsonDocument::fromJson(text).array().at(0);
+        out.value = fromProtocolJson(rpcValueToJson(res.value));
         callback(out);
     });
 }

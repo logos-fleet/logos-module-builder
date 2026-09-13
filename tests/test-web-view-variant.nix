@@ -184,8 +184,17 @@ in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
   done
   # ...and the door's own refusal text, which only the host TU defines. A build
   # that linked a stale host would compile the fixture and drop the door.
-  grep -qa "the page has bound no container bridge" \
-       "$variant/web_counter_view_backend.wasm" \
+  #
+  # NOT ASCII IN THE IMAGE, unlike the metaobject names above. This one is a
+  # QStringLiteral and Qt stores those as UTF-16, so every character of it is
+  # followed by a NUL and a plain `grep` for the sentence finds nothing whether
+  # the door is there or not. Dropping the NULs reads it back — the text is
+  # Latin-1 — and LC_ALL=C is what lets `tr` walk arbitrary bytes at all.
+  # (Through a file rather than a pipe: `grep -q` exits at the first match and
+  # the builder runs under `pipefail`, so the SIGPIPE it sends back would fail
+  # the pipeline exactly when the door IS there.)
+  LC_ALL=C tr -d '\0' < "$variant/web_counter_view_backend.wasm" > backend.text
+  LC_ALL=C grep -qa "the page has bound no container bridge" backend.text \
     || { echo "FAIL: the outbound door's fail-fast path is not in the image"; exit 1; }
   echo "PASS: the backend's callPeer slot and the outbound door are both in the image"
 
