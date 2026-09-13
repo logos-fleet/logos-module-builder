@@ -492,6 +492,34 @@ in
           sources = safeList (declared.sources or []);
         };
 
+      # ── what a `web` variant DECLARES it needs ───────────────────────────
+      #
+      # A `web` variant is a different artifact with a different backend, and
+      # therefore a different dependency set. logos-evm-wallet-ui is the case
+      # this exists for: the desktop plugin reaches six modules through a
+      # coordinator, and the `web` variant reaches two of them directly because
+      # the coordinator has no build for the target. The core RESOLVES a
+      # module's declared dependencies before loading it and refuses a module
+      # whose list it cannot satisfy, so a variant carrying the other build's
+      # list does not load at all -- with an error naming four modules the
+      # running image never calls.
+      #
+      # Absent means `dependencies`, which is what every `web` variant written
+      # before this key has and what most will always want.
+      #
+      # NOT a subset check. A `web` variant may need something the native build
+      # does not -- a module that only exists on a phone -- and a rule that
+      # forbade it would be guessing about a direction nothing has taken yet.
+      web_dependencies =
+        let declared = ((raw.web or {}).dependencies or null); in
+        if declared == null then
+          noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
+        else if !(builtins.isList declared) then
+          throw ("metadata.json: web.dependencies must be a list of module names in "
+                 + "module '${raw.name or "?"}', got: ${builtins.toJSON declared}")
+        else
+          noDuplicateNames "web.dependencies" (depNames_ "web.dependencies" declared);
+
       # Names of external_libraries entries built with go_build (for CMake whole-archive link flags)
       go_static_lib_names = map (x: x.name) (lib.filter (x: x ? go_build && x.go_build == true)
         (safeList (nix.external_libraries or [])));

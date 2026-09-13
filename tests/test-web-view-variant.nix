@@ -161,6 +161,43 @@ in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
   fi
   echo "PASS: the variant is ''${total} KB — its backend and its QML, not a runtime"
 
+  # ── the second door is IN the image ───────────────────────────────────────
+  #
+  # logos_web_module_call.h is how a `web` variant's backend calls another
+  # module, and the whole of its implementation is in the host translation unit
+  # that is linked beside the backend. Two things can go wrong silently:
+  #
+  #   * the header is not on the backend's include path, so a backend that uses
+  #     it does not COMPILE — caught above, by this build succeeding at all,
+  #     since the fixture's `callPeer` is written against it;
+  #   * the backend compiles and the slot never reaches the `.rep` surface the
+  #     QML runtime acquires, which is a module that silently cannot be asked.
+  #
+  # The metaobject's own string table is where the second one is decidable from
+  # outside: moc writes every slot's name and signature into the image, so the
+  # fixture's new slot is in these bytes or it is not in the module's API.
+  for sym in callPeer lastCall; do
+    grep -qa "$sym" "$variant/web_counter_view_backend.wasm" \
+      || { echo "FAIL: $sym is not in the backend image. The fixture's door-using"
+           echo "      slot did not reach the .rep surface the runtime acquires."
+           exit 1; }
+  done
+  # ...and the door's own refusal text, which only the host TU defines. A build
+  # that linked a stale host would compile the fixture and drop the door.
+  #
+  # NOT ASCII IN THE IMAGE, unlike the metaobject names above. This one is a
+  # QStringLiteral and Qt stores those as UTF-16, so every character of it is
+  # followed by a NUL and a plain `grep` for the sentence finds nothing whether
+  # the door is there or not. Dropping the NULs reads it back — the text is
+  # Latin-1 — and LC_ALL=C is what lets `tr` walk arbitrary bytes at all.
+  # (Through a file rather than a pipe: `grep -q` exits at the first match and
+  # the builder runs under `pipefail`, so the SIGPIPE it sends back would fail
+  # the pipeline exactly when the door IS there.)
+  LC_ALL=C tr -d '\0' < "$variant/web_counter_view_backend.wasm" > backend.text
+  LC_ALL=C grep -qa "the page has bound no container bridge" backend.text \
+    || { echo "FAIL: the outbound door's fail-fast path is not in the image"; exit 1; }
+  echo "PASS: the backend's callPeer slot and the outbound door are both in the image"
+
   mkdir -p $out
   cp "$variant/web-view.json" $out/
   # A pointer to the variant this check realised, so the browser end-to-end can
