@@ -92,6 +92,9 @@ let
       $CC -shared -fPIC -I${greetSrc} -o \
         "$out/lib/libgreet${np.stdenv.hostPlatform.extensions.sharedLibrary}" \
         ${greetSrc}/greet.c
+      $CC -shared -fPIC -I${greetSrc} -o \
+        "$out/lib/libgreetaux${np.stdenv.hostPlatform.extensions.sharedLibrary}" \
+        ${greetSrc}/greetaux.c
     '';
 
   # The mobile half, in the TARGET's own stdenv — Xcode's clang for iOS (nix's
@@ -111,9 +114,11 @@ let
       buildPhase = ''
         runHook preBuild
         mkdir -p $out/lib $out/include
-        cp ${greetSrc}/greet.h $out/include/
+        cp ${greetSrc}/greet.h ${greetSrc}/greetaux.h $out/include/
         "$CC" ${iosFlags} -c -fPIC -I${greetSrc} -o greet.o ${greetSrc}/greet.c
         "$AR" rcs $out/lib/libgreet.a greet.o
+        "$CC" ${iosFlags} -c -fPIC -I${greetSrc} -o greetaux.o ${greetSrc}/greetaux.c
+        "$AR" rcs $out/lib/libgreetaux.a greetaux.o
         runHook postBuild
       '';
       dontInstall = true;

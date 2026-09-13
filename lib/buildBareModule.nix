@@ -305,6 +305,32 @@ in mkDerivation ({
     ${lib.concatMapStringsSep "\n" (e: ''
       # Only the LIBRARY images go; the headers `generate` staged beside them
       # are source and are right for every target.
+      #
+      # WHAT IS DELETED IS WHAT THIS PACKAGE IS ABOUT TO REPLACE -- by FILE
+      # name, not by the external-lib entry's name. The two are often the same
+      # and need not be: `nix.external_libraries` names a PACKAGE, and one
+      # package may ship several libraries under names of its own.
+      # package_manager_module declares a single entry `logos_pm` whose package
+      # installs libpackage_manager_lib AND liblgx, and its CMakeLists links
+      # both by those names. Deleting only lib<entry>.* left the build-platform
+      # images of the rest in place, and _logos_find_external_lib prefers a
+      # shared library over a static one -- so the iOS link picked the macOS
+      # dylib and stopped at
+      #     ld: building for 'iOS-simulator', but linking in dylib
+      #         (.../libpackage_manager_lib.dylib) built for 'macOS'
+      # with the target's archive sitting in the same directory. (Measured
+      # 2026-09-13.)
+      for _image in ${e.drv}/lib/*; do
+        [ -e "$_image" ] || continue
+        # Everything from the first dot on is a suffix, so libfoo.so.1.2 and
+        # libfoo.dll.a both reduce to the stem `libfoo`.
+        _stem=$(basename "$_image")
+        _stem=''${_stem%%.*}
+        for _ext in so dylib dll a lib dll.a; do rm -f "lib/$_stem.$_ext"; done
+      done
+      # ...and by the ENTRY's name as well, for the reverse case the loop above
+      # cannot see: an image `generate` staged as lib<entry>.* that this package
+      # ships under no name at all, which would otherwise be left behind.
       for _ext in so dylib dll a lib; do
         rm -f "lib/lib${e.name}.$_ext" "lib/${e.name}.$_ext"
       done

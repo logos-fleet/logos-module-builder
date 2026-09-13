@@ -17,4 +17,5 @@ logos_module(
         src/bare_extlib_impl.cpp
     EXTERNAL_LIBS
         greet
+        greetaux
 )
