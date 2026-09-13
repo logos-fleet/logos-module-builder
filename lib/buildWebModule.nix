@@ -41,12 +41,25 @@
   # logos-protocol's wasm subset: packages.<system>.logos-protocol-wasm. Both
   # the headers this compiles against and the archive it links.
   logosProtocolWasm,
+  # The module's core when it is not the C++ in `generatedSrc`: a
+  # `codegen.rust` module's crate, compiled for wasm32-unknown-emscripten.
+  # `rustStaticNames` is what LogosModule.cmake resolves (to lib/lib<name>.a,
+  # inside the source tree); `stagedArchives` are the store paths copied there.
+  # Both empty for a C++ module, which then builds exactly as before.
+  rustStaticNames ? [],
+  stagedArchives ? [],
   extraNativeBuildInputs ? [],
   extraBuildInputs ? [],
 }:
 
 let
   stem = "${config.name}_wasm";
+
+  # QUOTED, because the value is a `;`-separated cmake list and this is a
+  # literal shell command line. Empty (and the flag absent) for a C++ module.
+  rustStaticLibsFlag =
+    lib.optionalString (rustStaticNames != [])
+      ''-DLOGOS_MODULE_RUST_STATIC_LIBS="${lib.concatStringsSep ";" rustStaticNames}"'';
 
   # The manifest the package manager and the Web container read. `main` is the
   # loader page, never the wasm: a `web` variant's entry point is a document,
@@ -74,6 +87,16 @@ in pkgs.stdenv.mkDerivation {
   nativeBuildInputs = [ pkgs.cmake pkgs.ninja ] ++ extraNativeBuildInputs;
   buildInputs = [ pkgs.nlohmann_json ] ++ extraBuildInputs;
 
+  # Before cmake, and by overwrite: logos_wasm_module() resolves each
+  # rustStaticNames entry to lib/lib<name>.a inside the SOURCE tree, so the
+  # wasm archive has to land under the name `generate` used -- displacing the
+  # build platform's archive if one is there.
+  postPatch = lib.optionalString (stagedArchives != []) ''
+    mkdir -p lib
+    ${lib.concatMapStringsSep "\n" (a: ''cp -f "${a}" lib/'') stagedArchives}
+    chmod -R u+w lib
+  '';
+
   dontUseCmakeConfigure = true;
   dontWrapQtApps = true;
   # There is nothing in a wasm artifact for the Darwin/Linux fixup phases to
@@ -100,6 +123,7 @@ in pkgs.stdenv.mkDerivation {
     # cannot have Qt.
     cmake .. -GNinja ${lib.escapeShellArgs pkgs.logosWasmCmakeFlags} \
       -DLOGOS_MODULE_WEB=ON \
+      ${rustStaticLibsFlag} \
       -DCMAKE_BUILD_TYPE=Release \
       -DLOGOS_CPP_SDK_ROOT=${logosSdk} \
       -DLOGOS_PROTOCOL_ROOT=${logosProtocolWasm} \

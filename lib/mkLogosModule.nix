@@ -652,6 +652,113 @@ let
           '';
         });
 
+
+      # ── the Rust core, compiled for the `web` variant ──────────────────────
+      #
+      # THE LEG THAT WAS MISSING. `logos_wasm_module()` linked C++ objects and
+      # logos-protocol's wasm archive, so a `codegen.rust` module -- whose
+      # module-impl C ABI lives entirely inside its crate -- had no `web` output
+      # it could be. The Bare/mobile path solved the same problem for a cross
+      # target (`rustStaticNames` + the archive staged into lib/); this is that
+      # path aimed at wasm32.
+      #
+      # `wasm32-unknown-emscripten`, NOT `wasm32-unknown-unknown`. The image the
+      # archive lands in is an emscripten one: it has a libc, a filesystem and
+      # the JS glue the host and the storage mount are written against. A
+      # `-unknown-unknown` archive expects none of that and would not link
+      # against emscripten's libc++ at all.
+      rustWasmTarget = "wasm32-unknown-emscripten";
+
+      # The toolchain has to CARRY that target's std -- nixpkgs' rustc ships
+      # only the host's. rust-overlay is already an input for the `nix.rust.toolchain`
+      # escape hatch, and `.override { targets = [...] }` is the same mechanism
+      # the Windows cross leg uses; this just asks for a different triple.
+      #
+      # Honours `nix.rust.toolchain` when a module pins one, so a crate that
+      # needs a newer rustc gets the same rustc for both of its targets. A
+      # module that pins none gets the overlay's current stable, which moves
+      # only with this repo's flake.lock.
+      rustWasmPlatform =
+        if rust-overlay == null then null
+        else
+          let
+            bpkgs = common.mkPkgsWith [ (import rust-overlay) ] (common.buildSystemFor system);
+            channel =
+              if config.nix_rust.toolchain != null
+              then bpkgs.rust-bin.stable.${config.nix_rust.toolchain}
+              else bpkgs.rust-bin.stable.latest;
+            toolchain = channel.default.override { targets = [ rustWasmTarget ]; };
+          in bpkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
+
+      # Null -- and the `web` output absent for a Rust module -- when the
+      # builder has no rust-overlay input. Same rule as the missing wasm
+      # protocol subset above: a pin that predates the leg is not an eval error
+      # in every consumer, it is simply a module with no `web` output yet.
+      rustStaticLibWasm =
+        if !isRustModule || rustWasmPlatform == null then null
+        else rustWasmPlatform.buildRustPackage {
+          pname = "${rustStaticName}-wasm";
+          version = config.version;
+          src = rustCrateSrc;
+          sourceRoot = "logos-${config.name}-rust-src/rust-lib";
+          cargoLock = {
+            lockFile = "${rustCrateDir}/Cargo.lock";
+            allowBuiltinFetchGit = true;
+          };
+          nativeBuildInputs = rustNativeBuildPkgs ++ rustExtraNativeBuildInputs;
+          # NOT rustBuildPkgs. Those are the TARGET set's link libraries, and
+          # the target here is wasm32 -- a native .so on this line would be
+          # accepted by cargo and rejected by wasm-ld with a message about file
+          # format. A crate that needs a system library in its `web` variant
+          # needs that library built for wasm32, which is what
+          # `nix.external_libraries` is for.
+          env = config.nix_rust.env // rustEnv // {
+            CARGO_BUILD_TARGET = rustWasmTarget;
+            # cc-rs and rustc both key off the underscored triple. `emcc` by
+            # NAME rather than by store path: logosEmscriptenSetup puts it on
+            # PATH with a writable cache, and the wrapper is what knows where
+            # PYTHON is.
+            CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER = "emcc";
+            CC_wasm32_unknown_emscripten = "emcc";
+            CXX_wasm32_unknown_emscripten = "em++";
+            AR_wasm32_unknown_emscripten = "emar";
+          };
+          doCheck = false;
+          # The archive is wasm objects; there is nothing here for the native
+          # fixup phases to strip or rewrite.
+          dontStrip = true;
+          dontFixup = true;
+          # Driven directly rather than through cargoBuildHook, for the reason
+          # the Windows leg states: the hook derives `--target` from the
+          # stdenv's host platform, and this derivation deliberately runs in the
+          # BUILD platform's stdenv so the toolchain is runnable.
+          buildPhase = ''
+            runHook preBuild
+            ${pkgs.logosEmscriptenSetup}
+            export CARGO_HOME=$TMPDIR/cargo
+            cargo build --release --offline --target ${rustWasmTarget}
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lib
+            cp target/${rustWasmTarget}/release/lib${rustStaticName}.a $out/lib/
+            runHook postInstall
+          '';
+          # THE ARCHIVE IS WASM. A toolchain whose `--target` did not take
+          # produces a perfectly good NATIVE archive under the same name, which
+          # then fails the wasm link with a message about file format three
+          # steps from its cause -- or worse, is silently accepted. `\0asm` is
+          # the wasm object magic; ar members carry it directly.
+          doInstallCheck = true;
+          installCheckPhase = ''
+            runHook preInstallCheck
+            grep -qa $'\0asm' $out/lib/lib${rustStaticName}.a \
+              || { echo "lib${rustStaticName}.a holds no wasm object: the ${rustWasmTarget} target did not take"; exit 1; }
+            runHook postInstallCheck
+          '';
+        };
+
       # Stage the compiled staticlib where LogosModule.cmake's
       # LOGOS_MODULE_RUST_STATIC_LIBS block finds it (the plugin build's lib/).
       rustStaging = lib.optionalString isRustModule ''
@@ -912,13 +1019,24 @@ let
       logosProtocolWasmPkg =
         (logos-protocol.packages.${system} or {}).logos-protocol-wasm or null;
 
+      # ...and null for a Rust module whose crate has no wasm32 archive, for
+      # the same reason: a builder with no rust-overlay input cannot produce
+      # one, and `web` is then an output that does not exist rather than an
+      # eval error.
       webVariant =
         if logosProtocolWasmPkg == null then null
+        else if isRustModule && rustStaticLibWasm == null then null
         else buildWebModule {
           inherit pkgs config builderRoot logosSdk;
           inherit extraNativeBuildInputs extraBuildInputs;
           generatedSrc = moduleGenerate;
           logosProtocolWasm = logosProtocolWasmPkg;
+          # The module's own core, for the languages whose core is not the C++
+          # in `generatedSrc`. Same shape as buildBareModule's cross staging:
+          # the archive arrives under the name generate used, in lib/.
+          rustStaticNames = lib.optional isRustModule rustStaticName;
+          stagedArchives = lib.optional isRustModule
+            "${rustStaticLibWasm}/lib/lib${rustStaticName}.a";
         };
 
       # Two header variants per module — Qt-typed and lp (Qt-free,
