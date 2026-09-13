@@ -320,11 +320,17 @@ in mkDerivation ({
       #         (.../libpackage_manager_lib.dylib) built for 'macOS'
       # with the target's archive sitting in the same directory. (Measured
       # 2026-09-13.)
-      for _target in ${e.drv}/lib/*; do
-        [ -e "$_target" ] || continue
-        _stem=$(basename "$_target"); _stem=''${_stem%%.*}
+      for _image in ${e.drv}/lib/*; do
+        [ -e "$_image" ] || continue
+        # Everything from the first dot on is a suffix, so libfoo.so.1.2 and
+        # libfoo.dll.a both reduce to the stem `libfoo`.
+        _stem=$(basename "$_image")
+        _stem=''${_stem%%.*}
         for _ext in so dylib dll a lib dll.a; do rm -f "lib/$_stem.$_ext"; done
       done
+      # ...and by the ENTRY's name as well, for the reverse case the loop above
+      # cannot see: an image `generate` staged as lib<entry>.* that this package
+      # ships under no name at all, which would otherwise be left behind.
       for _ext in so dylib dll a lib; do
         rm -f "lib/lib${e.name}.$_ext" "lib/${e.name}.$_ext"
       done
