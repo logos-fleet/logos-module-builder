@@ -70,7 +70,12 @@ let
     author = config.author or "";
     type = config.type;
     main = "index.html";
-    dependencies = config.dependencies or [];
+    # THE VARIANT'S OWN LIST. The core resolves a module's declared
+    # dependencies before loading it, so a `web` variant that inherited a
+    # desktop build's list would be refused for modules its image never calls.
+    # `config.web_dependencies` is `dependencies` unless metadata.json says
+    # otherwise (parseMetadata: `web.dependencies`).
+    dependencies = config.web_dependencies or config.dependencies or [];
     # THE VARIANT SAYS WHAT IT IS. A `web` variant may be hand-written
     # JavaScript or a compiled wasm host, and a host that wants to know (to log
     # it, to decide a memory budget, to refuse one on a device without wasm)

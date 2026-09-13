@@ -70,6 +70,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
@@ -193,12 +194,17 @@ public:
         if (req.object != kModuleName) {
             res.ok = false;
             res.err = "object not published: " + req.object;
+            std::printf("[logos-web-view %s] contract query for '%s' refused: "
+                        "this image serves '%s'\n",
+                        kModuleName.c_str(), req.object.c_str(), kModuleName.c_str());
             reply(std::move(res));
             return;
         }
         if (!g_backend) {
             res.ok = false;
             res.err = kModuleName + ": the view backend has not been built yet";
+            std::printf("[logos-web-view %s] contract query: no backend yet\n",
+                        kModuleName.c_str());
             reply(std::move(res));
             return;
         }
@@ -229,7 +235,22 @@ public:
             res.methods.push_back(std::move(md));
         }
         res.ok = true;
+        // SAID OUT LOUD, ONCE. Answering this is the container's whole load
+        // verdict, and an empty answer is reported by the core as "the page
+        // never published a module" -- a sentence about the page that names
+        // nothing in it. The count is the one fact that separates "the query
+        // never arrived" from "it arrived and this image had nothing to say".
+        if (!m_introspected)
+            std::printf("[logos-web-view %s] contract query answered: %zu method(s)\n",
+                        kModuleName.c_str(), res.methods.size());
         reply(std::move(res));
+
+        // ANSWERING THIS *IS* THE LOAD. WebContainer::awaitLoad asks the page
+        // for its interface and takes an answer as the verdict, so the reply
+        // just sent is the last thing the core was waiting for: commitLoad and
+        // the registration of this module's token with capability_module happen
+        // on the other side of it. See hostAdmitted().
+        m_introspected = true;
     }
 
     void onSubscribe(const SubscribeMessage&, EventSink, const void*) override { }
@@ -241,7 +262,17 @@ public:
         if (req.token.empty())
             return;
         m_tokens[req.moduleName] = req.token;
+        // THE CORE HAS SPOKEN TO THIS PAGE. Every grant says so, including the
+        // module's own credential, which the container delivers as the last
+        // step of the load. See hostAdmitted() in logos_web_module_call.h for
+        // why a backend has to wait for this before it calls out.
+        m_admitted = true;
     }
+
+    // Both halves of the load, from inside the page: the core minted this
+    // module a credential and sent it, AND the container's contract query has
+    // been answered.
+    bool admitted() const { return m_admitted && m_introspected; }
 
     // The credential to present when calling `moduleName`. Empty when the core
     // has granted none, which a target module is free to refuse.
@@ -253,6 +284,8 @@ public:
 
 private:
     std::map<std::string, std::string> m_tokens;
+    bool m_admitted = false;
+    bool m_introspected = false;
 };
 
 // The image's one of each. File statics because the embind entry points below
@@ -341,6 +374,11 @@ namespace web {
 bool canCallModules()
 {
     return g_connection && g_channel && g_channel->isOpen();
+}
+
+bool hostAdmitted()
+{
+    return canCallModules() && g_handler && g_handler->admitted();
 }
 
 void callModuleAsync(const QString& module, const QString& method,

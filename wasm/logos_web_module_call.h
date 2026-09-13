@@ -75,5 +75,33 @@ void callModuleAsync(const QString& module, const QString& method,
 // through the callback rather than hanging.
 bool canCallModules();
 
+// Whether the CORE has finished admitting this module: it minted the page a
+// credential AND the container's contract query has been answered.
+//
+// THIS IS THE ONE TO WAIT ON BEFORE CALLING OUT AT STARTUP, and the difference
+// from canCallModules() is worth a paragraph because getting it wrong costs a
+// load. The bridge resolves early — the page has a channel while the container
+// is still asking it what it serves — and an outbound call made in that window
+// is a SYNCHRONOUS native call on the container's own thread, made while the
+// container is inside its own admission round trip. The capability handshake
+// behind it then runs for its whole budget against a module the core has not
+// finished registering, the container's awaitLoad deadline passes underneath
+// it, and the module is reported as "the page never published a module" — a
+// load failure whose cause is in a different process from its symptom.
+//
+// TWO SIGNALS, BECAUSE THE CORE'S LOAD PATH USES BOTH AND IN THIS ORDER:
+//
+//   1. it delivers the module's credential to the page  (before awaitLoad)
+//   2. it asks the page what it serves                  (awaitLoad itself)
+//   3. it registers that credential with capability_module, WITHOUT WHICH
+//      every outbound call this module makes is refused "token not
+//      recognized"                                      (after awaitLoad)
+//
+// Only (2) is observable from in here as the LAST of the three, so answering
+// the contract query is the edge: (3) happens on the other side of the reply
+// this image just sent. Waiting on (1) alone was measured failing exactly as
+// described above.
+bool hostAdmitted();
+
 } // namespace web
 } // namespace logos
