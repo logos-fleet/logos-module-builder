@@ -30,6 +30,12 @@
 #     with nothing durable mounted the image SAYS so and `remember` refuses to
 #     claim a durability it does not have, which is the whole difference between
 #     a module that knows it lost the data and one that does not.
+#   * THE MODULE SEES WHO IS CALLING IT. A `web` variant is the only place in
+#     the stack where the caller cannot ride on the token -- the container
+#     presents the module's OWN root credential on every call it relays -- so
+#     the identity travels as a field on the Call and the image believes it over
+#     the token it was handed. Asserted where the two DISAGREE, because agreeing
+#     is what the broken version did (logos-workspace#129).
 #   * A PANIC IS A MODULE FAILURE AND NOT A PAGE CRASH. The counter's `panic`
 #     method runs __builtin_trap() -- what a Rust core built `panic = "abort"`
 #     compiles a panic to on wasm32. Driven three ways: the image traps rather
@@ -185,7 +191,8 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     const methodsResult = a.heard.find((m) => m.type === METHODS_RESULT);
     if (!methodsResult || !methodsResult.payload.ok) fail('the image answered no Methods', a.heard);
     const names = methodsResult.payload.methods.map((m) => m.name).sort();
-    for (const want of ['add', 'current', 'increment', 'recall', 'remember', 'reset']) {
+    for (const want of ['add', 'callerIdentity', 'current', 'increment', 'recall',
+                        'remember', 'reset']) {
       if (!names.includes(want)) fail('the published interface is missing ' + want + ': ' + names);
     }
 
@@ -227,6 +234,53 @@ in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
     console.log('PASS: the interface publishes ' + names.join(', '));
     console.log('PASS: state survives calls; unknown method, foreign object and '
                 + 'untokened call are each refused');
+
+    // ── WHO THE MODULE THINKS IS CALLING ───────────────────────────────────
+    //
+    // A RELAY CANNOT BE IDENTIFIED BY ITS TOKEN, and this image is only ever
+    // reached through one. The container presents the relayed module's OWN root
+    // credential on every call it forwards -- it holds no other -- so the
+    // token-owner derivation answers this image ITS OWN NAME for every caller
+    // in the fleet. Measured on a device before the fix:
+    // keystore_module.caller_identity(), asked by wallet_ui, answered
+    // `module "keystore_module"`, and every name-gated method on that module
+    // then refused everybody (logos-workspace#129).
+    //
+    // So the caller travels as DATA on the Call, beside the token, and the
+    // three frames below are the whole contract from inside the image: the
+    // field is believed, it beats the token derivation even when the two
+    // DISAGREE (which is the shipping case, not a corner), and an absent one
+    // still falls back so a peer that predates the field is unchanged.
+    //
+    // 'tok-abc' is filed under 'core' from the door-shuts case above, which is
+    // what makes the disagreement real: without the field this image would say
+    // module:core.
+    a.send(CALL, { id: 9,  authToken: 'tok-abc', object: 'bare_counter',
+                   method: 'callerIdentity', args: [],
+                   caller: JSON.stringify({ kind: 'module', name: 'wallet_ui' }) });
+    a.send(CALL, { id: 10, authToken: 'tok-abc', object: 'bare_counter',
+                   method: 'callerIdentity', args: [] });
+    a.send(CALL, { id: 11, authToken: 'tok-abc', object: 'bare_counter',
+                   method: 'callerIdentity', args: [],
+                   caller: JSON.stringify({ kind: 'host' }) });
+
+    const named = a.result(9);
+    if (!named || !named.payload.ok || named.payload.value !== 'module:wallet_ui') {
+      fail('a relayed call did not name its caller to the module: '
+           + JSON.stringify(named && named.payload), a.heard);
+    }
+    const derived = a.result(10);
+    if (!derived || !derived.payload.ok || derived.payload.value !== 'module:core') {
+      fail('a call with no caller field lost the token-owner fallback: '
+           + JSON.stringify(derived && derived.payload), a.heard);
+    }
+    const host = a.result(11);
+    if (!host || !host.payload.ok || host.payload.value !== 'host') {
+      fail('the host anchor arm did not survive the wire: '
+           + JSON.stringify(host && host.payload), a.heard);
+    }
+    console.log('PASS: the module sees the CALL\'s caller (module:wallet_ui, host), '
+                + 'and the token-owner fallback when none was named');
 
     // ── PER IMAGE: two Wasm hosts cannot see each other's tokens ────────────
     //

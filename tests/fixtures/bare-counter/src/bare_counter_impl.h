@@ -41,6 +41,23 @@ public:
     // statement in that host's terms.
     void panic();
 
+    // WHO IS CALLING, as the module itself sees it.
+    //
+    // The one thing in this fixture that reads AMBIENT state rather than its
+    // arguments, and the reason it is here: `web` variants are the only place
+    // in the stack where the caller cannot be carried by the token. The
+    // container presents the module's OWN root credential on every call it
+    // relays -- it holds no other -- so a Wasm host deriving an identity from
+    // that token answers the module ITS OWN NAME for every caller in the fleet
+    // (logos-workspace#129). A test can only see the difference through a
+    // method that says what logos::currentCaller() said.
+    //
+    // A STABLE SPELLING, not a sentence: "module:<name>", "host", "unknown",
+    // "derived:<parent>/<leaf>", "operator:<name>" -- the same identity string
+    // logos_rust_sdk's LogosCaller::identity() produces, so a fixture in either
+    // language is comparable against the same expected value.
+    std::string callerIdentity();
+
     // PERSISTENCE, and the only pair here that touches the module's own store.
     //
     // A module that writes with the ordinary language runtime is correct on a
