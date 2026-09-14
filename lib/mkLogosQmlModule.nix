@@ -247,9 +247,9 @@ let
   #
   # THE GENERATED TREE COMES FROM THE BUILD PLATFORM, for the same reason the
   # mobile Bare artifact's does: `generate` is source plus everything the code
-  # generators emitted, and a code generator is a host tool. The framework is a
-  # cross COMPILE of the native `generate`, which also makes it byte-identical
-  # in input to the desktop plugin.
+  # generators emitted, and a code generator is a host tool. The view image is
+  # a cross COMPILE of the native `generate`, which also makes it
+  # byte-identical in input to the desktop plugin.
   viewFrameworkFor = { androidBuildSystem }:
     common.forAllMobileSystems { inherit androidBuildSystem; }
       ({ system, pkgs, buildSystem }:
@@ -257,9 +257,9 @@ let
           mobileConfig = configFor system;
 
           # A QML-only module has no .rep, no backend and no C++ at all, so
-          # there is nothing to compile into a framework — it would be a QML
-          # file in a Mach-O wrapper. Such a module ships its QML in the LGX
-          # and the host loads it directly.
+          # there is nothing to compile into an image — it would be a QML file
+          # wrapped in a library. Such a module ships its QML in the LGX and
+          # the host loads it directly.
           refuseQmlOnly = throw ("logos-module-builder: module '"
             + mobileConfig.name + "' is QML-only (no `main` in metadata.json), "
             + "so it has no mobile `view` image. A view image IS the module's "
@@ -267,7 +267,7 @@ let
             + "to the app's Qt and the QML travels in the module's LGX.");
 
           # `view` is "qml/Main.qml" (a path relative to src/ or to the project
-          # root); the framework's qrc is built from the DIRECTORY and entered
+          # root); the image's qrc is built from the DIRECTORY and entered
           # at the file. Resolved here rather than in CMake because this is
           # where the module's source tree is; qmlDirFor does the two-layout
           # search, and an absent directory is fatal for THIS output.

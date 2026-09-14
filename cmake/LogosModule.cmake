@@ -1215,7 +1215,7 @@ logos_view_framework
 Build the **view image**: a ``type: ui_qml`` module as ONE library that carries
 its Qt backend and its QML and reaches the app's Qt rather than carrying a copy.
 
-TWO SHAPES, and the platform decides which -- read off ``CMAKE_SYSTEM_NAME``,
+TWO SHAPES, and the platform decides which -- read off the target platform,
 never passed in:
 
   * **iOS** -- an embedded framework with NOTHING linked at all. Qt,
@@ -1457,9 +1457,14 @@ function(logos_view_framework)
     # a LOCAL dlopen into the classloader namespace — measured on an SM-G990B
     # for the Bare module, see buildBareModule.nix). There is no "bind upward"
     # on this platform; there is naming the soname.
+    #
+    # The SAME components the walk above compiled against, derived from the one
+    # list rather than restated: a component added to _QT_COMPONENTS that this
+    # link did not name would compile here and fail on the device, naming one
+    # mangled symbol out of a Qt module nobody linked.
     if(_VIEW_ANDROID)
-        target_link_libraries(${_TARGET} PRIVATE
-            Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::RemoteObjects)
+        list(TRANSFORM _QT_COMPONENTS PREPEND "Qt6::" OUTPUT_VARIABLE _QT_LINK)
+        target_link_libraries(${_TARGET} PRIVATE ${_QT_LINK})
     endif()
 
     _logos_module_sdk_includes(${_TARGET} "${_GEN_DIR}")

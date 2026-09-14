@@ -98,46 +98,48 @@ esac
 # local entries say nothing about what the loader can see. The type letter is
 # the whole classification (U undefined, V/W weak, lowercase local, the rest
 # strong), and an ELF name carries no leading underscore to strip.
+#
+# ONE branch reads the table and names the awk program that classifies it, so
+# everything format-specific about symbols ends here: the four words are all
+# the rest of the gate sees.
 if [ "$FORMAT" = macho ]; then
     raw=$("$NM" -m "$ARTIFACT" 2>/dev/null)
+    classify='
+        {
+            line = $0
+            sub(/[ \t]*\((from [^)]*|dynamically looked up)\)[ \t]*$/, "", line)
+            n = split(line, f, /[ \t]+/)
+            name = f[n]
+            sub(/^_/, "", name)
+            if (line ~ /\(undefined\)/)     { print "undefined", name }
+            else if (line ~ /[ \t]weak /)   { print "weak", name }
+            else if (line ~ /non-external/) { print "local", name }
+            else                            { print "strong", name }
+        }'
 else
     raw=$("$NM" -D "$ARTIFACT" 2>/dev/null)
+    classify='
+        NF >= 2 {
+            type = $(NF - 1)
+            name = $NF
+            # THE VERSION SUFFIX GOES FIRST. Qt for Android is built with a
+            # symbol version script, so every Qt reference in here is recorded
+            # as `_ZN7QObject16staticMetaObjectE@Qt_6`. Matching the marker
+            # names below without dropping it finds nothing at all — which
+            # reads as "this image references no Qt", the exact opposite of the
+            # truth.
+            sub(/@.*$/, "", name)
+            if (type == "U")            { print "undefined", name }
+            else if (type ~ /^[VWvw]$/) { print "weak", name }
+            else if (type ~ /^[a-z]$/)  { print "local", name }
+            else                        { print "strong", name }
+        }'
 fi
 if [ -z "$raw" ]; then
     echo "logos-view-gate: FAIL — could not read a symbol table from $ARTIFACT" >&2
     exit 1
 fi
-
-if [ "$FORMAT" = macho ]; then
-SYMS=$(printf '%s\n' "$raw" | awk '
-    {
-        line = $0
-        sub(/[ \t]*\((from [^)]*|dynamically looked up)\)[ \t]*$/, "", line)
-        n = split(line, f, /[ \t]+/)
-        name = f[n]
-        sub(/^_/, "", name)
-        if (line ~ /\(undefined\)/)     { print "undefined", name }
-        else if (line ~ /[ \t]weak /)   { print "weak", name }
-        else if (line ~ /non-external/) { print "local", name }
-        else                            { print "strong", name }
-    }')
-else
-SYMS=$(printf '%s\n' "$raw" | awk '
-    NF >= 2 {
-        type = $(NF - 1)
-        name = $NF
-        # THE VERSION SUFFIX GOES FIRST. Qt for Android is built with a symbol
-        # version script, so every Qt reference in here is recorded as
-        # `_ZN7QObject16staticMetaObjectE@Qt_6`. Matching the marker names
-        # below without dropping it finds nothing at all — which reads as "this
-        # image references no Qt", the exact opposite of the truth.
-        sub(/@.*$/, "", name)
-        if (type == "U")                       { print "undefined", name }
-        else if (type ~ /^[VWvw]$/)            { print "weak", name }
-        else if (type ~ /^[a-z]$/)             { print "local", name }
-        else                                   { print "strong", name }
-    }')
-fi
+SYMS=$(printf '%s\n' "$raw" | awk "$classify")
 undefined_syms=$(printf '%s\n' "$SYMS" | awk '$1 == "undefined" { print $2 }' | sort -u)
 strong_syms=$(printf '%s\n' "$SYMS" | awk '$1 == "strong" { print $2 }' | sort -u)
 defined_syms=$(printf '%s\n' "$SYMS" | awk '$1 != "undefined" { print $2 }' | sort -u)
@@ -170,10 +172,10 @@ VIEW_ABI=(
 )
 missing=$(comm -23 <(printf '%s\n' "${VIEW_ABI[@]}" | sort -u) \
                    <(printf '%s\n' "$defined_syms"))
-fail_each "missing view-framework ABI export" '.' "$missing" \
+fail_each "missing view ABI export" '.' "$missing" \
     "(the host reaches this image through dlsym and nothing else)"
 
-# ── 2. Qt is bound UPWARD, not carried ──────────────────────────────────────
+# ── 2. Qt comes from the app, not from in here ──────────────────────────────
 # Four symbols only QtCore's compiled objects define, that any Qt consumer
 # references: if they are undefined here, Qt is being resolved against the app
 # image. If any is DEFINED, a Qt archive is inside — which is a second QtCore
@@ -200,10 +202,10 @@ fi
 
 # A broader sweep over the same question, one step weaker on purpose: a
 # symbol owned by a Qt class that this image EXPORTS. The four markers above
-# are the real check — an archive's symbols would be LOCAL here, because the
-# iOS Qt is compiled -fvisibility=hidden. This clause catches the other
-# direction: a framework that re-publishes Qt's API, which is how a second
-# QtCore reaches a third image in the same process.
+# are the real check — a linked archive's symbols would be LOCAL here, because
+# the mobile Qt builds are compiled -fvisibility=hidden. This clause catches
+# the other direction: an image that re-publishes Qt's API, which is how a
+# second QtCore reaches a third image in the same process.
 #
 # Over what the image exports BEYOND its own declared edge. `qt_plugin_*` is
 # that edge: moc emits it from Q_PLUGIN_METADATA and clause 1 above REQUIRES
@@ -213,18 +215,18 @@ QT_OWNED_RE='^_Z(TV|TT|TI|TS|N|NK)?[0-9]+Q[A-Z]|^_ZN[0-9]+QtPrivate|^qt_[a-z]'
 beyond_abi=$(comm -23 <(printf '%s\n' "$strong_syms") \
                       <(printf '%s\n' "${VIEW_ABI[@]}" | grep -v '^qt_plugin' | sort -u) \
              | grep -v '^qt_plugin_')
-fail_each "Qt symbol EXPORTED by the framework" "$QT_OWNED_RE" "$beyond_abi" \
-    "(a view framework publishes its own C ABI and nothing else)"
+fail_each "Qt symbol EXPORTED by the view image" "$QT_OWNED_RE" "$beyond_abi" \
+    "(a view image publishes its own C ABI and nothing else)"
 
 # ── 3. the Logos host runtime comes from the app too ─────────────────────────
 # LogosAPI, the provider glue and the lp_* C ABI are in the app image for the
-# same reason Qt is: one core, one transport, one token store. A framework
-# that carried its own would answer a different registry than the app.
-fail_each "logos-protocol symbol DEFINED in a view framework" '^lp_' "$strong_syms" \
+# same reason Qt is: one core, one transport, one token store. An image that
+# carried its own would answer a different registry than the app.
+fail_each "logos-protocol symbol DEFINED in a view image" '^lp_' "$strong_syms" \
     "(the logos-protocol archive was linked in; lp_* must stay undefined)"
 LOGOS_HOST_RE='^_ZN8LogosAPI|^_ZN19LogosAPIClient|^_ZN12TokenManager|^_ZN19LogosProviderObject'
-fail_each "logos-qt-host object code linked into the framework" "$LOGOS_HOST_RE" "$strong_syms" \
-    "(the host runtime is the app's; the framework binds to it upward)"
+fail_each "logos-qt-host object code linked into the view image" "$LOGOS_HOST_RE" "$strong_syms" \
+    "(the host runtime is the app's; this image may reference it and never carry it)"
 
 # ── 4. the load commands, which the two platforms read OPPOSITELY ───────────
 #

@@ -622,11 +622,12 @@ nix build .#packages.aarch64-ios-simulator.view
 ```
 
 **Qt, compiled against and not linked** (the iOS leg), is the whole trick there
-and it has one sharp edge in CMake. A target that does not link `Qt6::Core` gets none of Qt's
-usage requirements: not the include directories (transitively — `Qt6::Qml`
-alone does not name `QtQmlIntegration`'s), not `cxx_std_17`, and not an
-AUTOMOC target at all, because CMake decides whether to run AUTOMOC by asking
-which Qt the target LINKS. `logos_view_framework()` walks the `Qt6::*`
+and it has one sharp edge in CMake. A target that does not link `Qt6::Core`
+gets none of Qt's usage requirements: not the include directories
+(transitively — `Qt6::Qml` alone does not name `QtQmlIntegration`'s), not
+`cxx_std_17`, and not an AUTOMOC target at all, because CMake decides whether
+to run AUTOMOC by asking which Qt the target LINKS.
+`logos_view_framework()` walks the `Qt6::*`
 interface graph by hand, skipping `$<LINK_ONLY:...>` entries (those are Qt's
 own build settings — `-fno-exceptions`, `-Werror` — which no consumer is
 compiled with), and sets `QT_MAJOR_VERSION` on the target so AUTOMOC runs.

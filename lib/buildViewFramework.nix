@@ -148,16 +148,18 @@ let
     cmakeFlagsArray+=("-DLOGOS_VIEW_LINK_HOST_ABI=$stubs")
   '';
 
-  # The gate reads the symbol table and the load commands, so it needs binary
-  # tools that can read the ARTIFACT's format — which, under cross, is not the
-  # builder's own. Same three-way answer buildBareModule gives, minus the
-  # native case this function never sees.
+  # BUILD-PLATFORM TOOLS THE ANDROID LEG NEEDS, and the iOS leg does not:
   #
-  #   iOS      Xcode's nm/otool, already on PATH from xcodeWrapper.
-  #   Android  the NDK's LLVM bintools, which read aarch64 ELF from a Mac.
-  #            `nm`/`readelf` by those names do not exist on Darwin at all.
-  binTools = lib.optionals isAndroid [
-    pkgs.pkgsBuildBuild.llvmPackages.bintools-unwrapped
+  #   bintools  the gate reads the symbol table and the load commands, so it
+  #             needs binaries that can read the ARTIFACT's format — which,
+  #             under cross, is not the builder's own. Same three-way answer
+  #             buildBareModule gives, minus the native case this function
+  #             never sees: iOS gets Xcode's nm/otool from xcodeWrapper, and
+  #             `nm`/`readelf` by those names do not exist on Darwin at all.
+  #   patchelf  the shipped SONAME; see installPhase.
+  androidNativeTools = with pkgs.pkgsBuildBuild; [
+    llvmPackages.bintools-unwrapped
+    patchelf
   ];
 
   gateEnv = lib.optionalString isAndroid ''
@@ -239,8 +241,7 @@ else
   src = generatedSrc;
 
   nativeBuildInputs = [ pkgs.cmake pkgs.ninja ]
-    ++ binTools
-    ++ lib.optional isAndroid pkgs.pkgsBuildBuild.patchelf
+    ++ lib.optionals isAndroid androidNativeTools
     ++ extraNativeBuildInputs;
   # Qt for the TARGET. On iOS it is found, compiled against and never linked;
   # on Android it is found, compiled against and LINKED by soname. It is a
