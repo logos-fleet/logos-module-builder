@@ -535,26 +535,49 @@ runtime, clicks the button with a real pointer event and watches the count come
 back. The second is not a nix check and cannot be one — no browser in the
 sandbox, no chromium in darwin nixpkgs.
 
-### The `view` output — a `ui_qml` module as an iOS framework
+### The `view` output — a `ui_qml` module as one mobile image
 
 ```bash
 nix build .#packages.aarch64-ios.view            # iPhone / iPad
 nix build .#packages.aarch64-ios-simulator.view  # the simulator
+nix build .#legacyPackages.<buildSystem>.mobile.aarch64-android.view   # Android
 ```
 
 The same `type: ui_qml` module as the desktop Qt plugin — same sources, same
-`generate` tree — built as ONE embedded framework carrying its Qt backend, the
-typed source AND replica of its `.rep`, and its QML compiled into the image's
-own `qrc`. Nothing is linked into it: Qt, logos-qt-host (`LogosAPI`) and the
-`lp_*` C ABI are all left **undefined** and resolve upward into the app image
-at `dlopen`, which is what ADR 0006 asks for and what the
-`ios-dlopen-bare-module` spike measured (Level 2).
+`generate` tree — built as ONE image carrying its Qt backend, the typed source
+AND replica of its `.rep`, and its QML compiled into the image's own `qrc`.
+Neither shape carries Qt or the Logos host runtime; they differ only in how
+they say so, because the two loaders are different.
 
-Layout: `Library/Frameworks/<name>_view.framework/{<name>_view,Info.plist}`,
+Android goes through `legacyPackages.<buildSystem>.mobile` for the same reason
+the mobile `bare` output does: a cross derivation's `system` is its BUILD
+platform, so `packages.aarch64-android` carries the canonical `x86_64-linux`
+one, which a Mac cannot realise.
+
+**iOS — nothing linked at all.** Qt, logos-qt-host (`LogosAPI`) and the `lp_*`
+C ABI are left **undefined** and resolve upward into the app image at `dlopen`,
+which is what ADR 0006 asks for and what the `ios-dlopen-bare-module` spike
+measured (Level 2). Layout:
+`Library/Frameworks/<name>_view.framework/{<name>_view,Info.plist}`,
 install_name `@rpath/<name>_view.framework/<name>_view` — copy it into
-`<App>.app/Frameworks/` with Code Sign On Copy. The module's `metadata.json`
-travels beside it at `share/logos/<name>/metadata.json`, because that flat
-directory has no room for a manifest and the host has to carry one.
+`<App>.app/Frameworks/` with Code Sign On Copy.
+
+**Android — linked by soname.** Qt there is a set of shared objects that
+androiddeployqt already packages, so the image simply names
+`libQt6Core_<abi>.so` and friends in `DT_NEEDED` and the app's own Qt answers.
+The Logos host runtime is named the same way a Bare module names it: the link
+pulls in EMPTY stub `.so`s carrying `liblogos_protocol.so` and
+`liblogos_qt_host.so` as their SONAMEs, under `--no-as-needed`, so every `lp_*`
+and every `LogosAPI` symbol stays undefined in the artifact and bionic still
+knows where to look. (Bionic resolves a `dlopen`'d library only against its own
+`DT_NEEDED` closure and the global group, and an app's libraries are never
+global — there is no "bind upward" on this platform.) Layout:
+`lib/lib<name>_view.so`, SONAME to match, which is the only shape an APK
+carries.
+
+The module's `metadata.json` travels beside the image on both, at
+`share/logos/<name>/metadata.json`, because the flat directory each loader
+opens from has no room for a manifest and the host has to carry one.
 
 **The C edge.** `<App>.app/Frameworks/` is flat and read-only, there is no
 plugin directory to scan, and a Store app does not take the `QPluginLoader`
@@ -575,35 +598,36 @@ second plugin is still exactly what it was.
 
 **Who gets one.** A `ui_qml` module with a C++ backend (`main` in
 `metadata.json`) and a `.rep`. A QML-only module is refused by name — a view
-framework IS the compiled backend, and with no backend there is nothing to
-bind Qt upward; its QML travels in the module's LGX. A module declaring
+image IS the compiled backend, and with no backend there is nothing to bind to
+the app's Qt; its QML travels in the module's LGX. A module declaring
 `nix.external_libraries` is refused for the same reason the mobile `bare`
 output refuses it.
 
-**iOS only.** `packages.aarch64-android` carries no `view` attribute. Android's
-Qt is a set of shared objects, so the same module there is a `.so` naming
-`libQt6Core_arm64-v8a.so` and friends in `DT_NEEDED` — a different artifact
-with a different gate.
-
 **The gate.** Every `view` derivation runs `scripts/logos-view-gate.sh` in its
 `postFixup` (`postFixup` and not `installCheckPhase`, for the reason spelled
-out under `bare` above). It fails on: a missing entry point from the table; a
-QtCore marker symbol DEFINED in the image, or none of them undefined; a Qt
-symbol EXPORTED beyond the module's own edge; a defined `lp_*` or
-logos-qt-host symbol; a Qt / logos-protocol library in the load commands; or
-no `qrc:/logos/...` URL in the bytes. It is a plain script:
+out under `bare` above) — and on Android logos-nix's DT_NEEDED gate as well,
+which is where an unbundled soname is caught. The view gate reads the
+artifact's own magic bytes and applies one rule in two formats. It fails on: a
+missing entry point from the table; a QtCore marker symbol DEFINED in the
+image, or none of them undefined; a Qt symbol EXPORTED beyond the module's own
+edge; a defined `lp_*` or logos-qt-host symbol; or no `qrc:/logos/...` URL in
+the bytes. The load-command clause is the one that reads OPPOSITELY on the two
+platforms: Mach-O must name no Qt or logos-protocol library at all, ELF must
+name `libQt6Core*`, `liblogos_protocol.so` and `liblogos_qt_host.so`. It is a
+plain script:
 
 ```bash
 nix build .#packages.aarch64-ios-simulator.view
 ./scripts/logos-view-gate.sh result/Library/Frameworks/my_view.framework
 ```
 
-**Qt, compiled against and not linked**, is the whole trick and it has one
-sharp edge in CMake. A target that does not link `Qt6::Core` gets none of Qt's
-usage requirements: not the include directories (transitively — `Qt6::Qml`
-alone does not name `QtQmlIntegration`'s), not `cxx_std_17`, and not an
-AUTOMOC target at all, because CMake decides whether to run AUTOMOC by asking
-which Qt the target LINKS. `logos_view_framework()` walks the `Qt6::*`
+**Qt, compiled against and not linked** (the iOS leg), is the whole trick there
+and it has one sharp edge in CMake. A target that does not link `Qt6::Core`
+gets none of Qt's usage requirements: not the include directories
+(transitively — `Qt6::Qml` alone does not name `QtQmlIntegration`'s), not
+`cxx_std_17`, and not an AUTOMOC target at all, because CMake decides whether
+to run AUTOMOC by asking which Qt the target LINKS.
+`logos_view_framework()` walks the `Qt6::*`
 interface graph by hand, skipping `$<LINK_ONLY:...>` entries (those are Qt's
 own build settings — `-fno-exceptions`, `-Werror` — which no consumer is
 compiled with), and sets `QT_MAJOR_VERSION` on the target so AUTOMOC runs.

@@ -1212,12 +1212,28 @@ endfunction()
 logos_view_framework
 --------------------
 
-Build the **iOS view framework**: a ``type: ui_qml`` module as one embedded
-framework that carries its Qt backend and its QML, and binds Qt UPWARD into
-the app image.
+Build the **view image**: a ``type: ui_qml`` module as ONE library that carries
+its Qt backend and its QML and reaches the app's Qt rather than carrying a copy.
+
+TWO SHAPES, and the platform decides which -- read off the target platform,
+never passed in:
+
+  * **iOS** -- an embedded framework with NOTHING linked at all. Qt,
+    logos-qt-host and ``lp_*`` are left undefined and dyld resolves them
+    against the app's own static Qt at load (ADR 0006). Apple's flat namespace
+    plus an iOS Qt built with ``reduce_exports`` off is what makes that
+    possible, and nothing else in this stack has that pair.
+  * **Android** -- a plain ``lib<name>_view.so``. Qt there is a set of SHARED
+    objects that androiddeployqt already packages, so the honest form of
+    "bind to the app's Qt" is a DT_NEEDED on ``libQt6Core_<abi>.so`` and
+    friends: one copy in the process, resolved by the loader, no export trie
+    to force. The Logos host runtime is reached the same way a Bare module
+    reaches it -- an empty stub carrying the host image's SONAME, so every
+    ``lp_*`` and every ``LogosAPI`` symbol stays UNDEFINED here and bionic
+    still knows where to look (see ``LOGOS_VIEW_LINK_HOST_ABI``).
 
 It is the same module, from the same generated tree, as the desktop Qt
-plugin — the ONE difference is the link. Nothing is linked at all:
+plugin — the ONE difference is the link. On iOS nothing is linked at all:
 
   * Qt is compiled against and never linked, so every Qt symbol the backend
     calls stays UNDEFINED and dyld resolves it against the app's own static
@@ -1240,8 +1256,9 @@ Three things are in the framework that are NOT in the desktop plugin:
 
 ``logos_module()`` routes here when ``LOGOS_MODULE_VIEW_FRAMEWORK`` is ON and
 then returns. The nix wrapper (mkLogosQmlModule's ``view`` output) runs
-``scripts/logos-view-gate.sh`` over the result; this function only produces
-the artifact, the gate decides whether the link was honest.
+``scripts/logos-view-gate.sh`` over the result — and, on Android, logos-nix's
+DT_NEEDED gate as well; this function only produces the artifact, the gates
+decide whether the link was honest.
 #]=======================================================================]
 function(logos_view_framework)
     cmake_parse_arguments(VIEW "" "NAME;REP_FILE;QML_URI;QML_TYPE_NAME"
@@ -1263,6 +1280,16 @@ function(logos_view_framework)
     endif()
     if(NOT LOGOS_VIEW_QML_ENTRY)
         message(FATAL_ERROR "logos_view_framework: LOGOS_VIEW_QML_ENTRY is not set.")
+    endif()
+
+    # WHICH SHAPE, read off the target platform and never passed in — for the
+    # same reason logos_bare_module() reads its four shapes off the host
+    # platform: a caller cannot then ask for a Mach-O framework from an NDK
+    # toolchain and get a link error forty lines deep instead of an answer.
+    if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+        set(_VIEW_ANDROID ON)
+    else()
+        set(_VIEW_ANDROID OFF)
     endif()
 
     set(_TARGET ${VIEW_NAME}_view)
@@ -1314,13 +1341,29 @@ function(logos_view_framework)
         # qt_plugin_instance for the host to call. This property is the
         # documented way to answer that question directly.
         QT_MAJOR_VERSION 6
-        PREFIX ""
         OUTPUT_NAME "${VIEW_NAME}_view"
-        SUFFIX ".dylib"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/view"
     )
+    # THE INSTALLED FILENAME, and on Android it is not decoration: an APK
+    # carries only files matching lib*.so and androiddeployqt drops anything
+    # else, exactly as for a Bare module. On iOS the binary inside a framework
+    # bundle is bare `<stem>`, so the prefix is cleared and the suffix named.
+    if(_VIEW_ANDROID)
+        set_target_properties(${_TARGET} PROPERTIES PREFIX "lib" SUFFIX ".so")
+    else()
+        set_target_properties(${_TARGET} PROPERTIES PREFIX "" SUFFIX ".dylib")
+    endif()
 
-    # ── Qt, compiled against and not linked ─────────────────────────────────
+    # ── Qt, compiled against ────────────────────────────────────────────────
+    # ...and, on iOS, NOT LINKED.
+    #
+    # The walk below collects Qt's usage requirements — include directories,
+    # compile definitions, options and the language level — without linking a
+    # thing, which is the only way to compile against Qt on the iOS leg. It
+    # runs on Android too and is not wasted there: `target_link_libraries` a
+    # few lines down adds the very same requirements a second time, so the
+    # ONE difference between the two shapes stays the link and nothing else.
+    #
     # TRANSITIVELY, and that is the whole difficulty. A Qt module's usage
     # requirements are spread over the Qt6::* targets it links: Qt6::Qml names
     # its own Headers directory and gets QtQmlIntegration's from Qt6::QmlIntegration,
@@ -1402,6 +1445,26 @@ function(logos_view_framework)
     get_target_property(_std ${_TARGET} CXX_STANDARD)
     if(NOT _std OR _std LESS 17)
         set_target_properties(${_TARGET} PROPERTIES CXX_STANDARD 17)
+    endif()
+
+    # ── ...and LINKED, on Android ───────────────────────────────────────────
+    # Qt there is a set of shared objects, and androiddeployqt packages exactly
+    # the ones a target links. A DT_NEEDED on libQt6Core_<abi>.so is therefore
+    # both the natural form and the ONLY one that reaches the app's Qt: bionic
+    # resolves a dlopen'd library against its own DT_NEEDED closure and the
+    # linker namespace's global group, and an app's own libraries are never in
+    # that group (everything an Android app loads goes through System.load(),
+    # a LOCAL dlopen into the classloader namespace — measured on an SM-G990B
+    # for the Bare module, see buildBareModule.nix). There is no "bind upward"
+    # on this platform; there is naming the soname.
+    #
+    # The SAME components the walk above compiled against, derived from the one
+    # list rather than restated: a component added to _QT_COMPONENTS that this
+    # link did not name would compile here and fail on the device, naming one
+    # mangled symbol out of a Qt module nobody linked.
+    if(_VIEW_ANDROID)
+        list(TRANSFORM _QT_COMPONENTS PREPEND "Qt6::" OUTPUT_VARIABLE _QT_LINK)
+        target_link_libraries(${_TARGET} PRIVATE ${_QT_LINK})
     endif()
 
     _logos_module_sdk_includes(${_TARGET} "${_GEN_DIR}")
@@ -1517,25 +1580,68 @@ function(logos_view_framework)
     target_sources(${_TARGET} PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/logos_view_abi_${VIEW_NAME}.cpp")
 
-    # ── the link that is not a link ─────────────────────────────────────────
-    # `-fixup_chains` is the spike's variant B: a modern fixup format and no
-    # dependency on the app being linked first. The deprecation warning on
-    # `-undefined dynamic_lookup` is Apple's and is expected.
-    target_link_options(${_TARGET} PRIVATE
-        "-Wl,-undefined,dynamic_lookup"
-        "-Wl,-fixup_chains"
-        "-Wl,-headerpad_max_install_names")
-    set_target_properties(${_TARGET} PROPERTIES
-        INSTALL_NAME_DIR "@rpath"
-        BUILD_WITH_INSTALL_NAME_DIR TRUE)
+    # ── the link ────────────────────────────────────────────────────────────
+    if(_VIEW_ANDROID)
+        # WHERE THE LOGOS HOST RUNTIME COMES FROM. `lp_*`, LogosAPI and the
+        # provider glue are the app's, exactly as on iOS — but bionic will not
+        # look for them unless the ELF says where, and an ELF says it with a
+        # DT_NEEDED. So each host image is named by linking an EMPTY shared
+        # object carrying its SONAME: `--no-as-needed` makes the linker record
+        # the dependency although not one symbol is taken from it, every
+        # `lp_*` and every LogosAPI symbol stays UNDEFINED in the artifact
+        # (the gate is as strict here as on iOS), and the ELF simply names
+        # where they come from. Same mechanism, same reasoning, as
+        # LOGOS_MODULE_BARE_LINK_HOST_ABI; a view image names two host images
+        # rather than one, because it uses the Qt host as well as the protocol.
+        #
+        # The stubs are built by the nix wrapper with the SAME cross toolchain
+        # that links this target — see buildViewFramework.nix.
+        if(NOT LOGOS_VIEW_LINK_HOST_ABI)
+            message(FATAL_ERROR
+                "logos_view_framework: LOGOS_VIEW_LINK_HOST_ABI is not set. On "
+                "Android it names the empty host-ABI stubs whose SONAMEs become "
+                "this image's DT_NEEDED; without them lp_* and LogosAPI resolve "
+                "against nothing and the module fails at dlopen on the device, "
+                "naming one symbol and none of the reason.")
+        endif()
+        # `-z undefs` is Android's spelling of iOS's `-undefined dynamic_lookup`
+        # and is needed for the same reason: the NDK toolchain file puts
+        # `-Wl,--no-undefined` on every shared link, and the whole point of this
+        # image is that Qt's host runtime symbols — LogosAPI::staticMetaObject
+        # and the rest — are NOT in it. Without this the link stops at the
+        # first one, with the stub carrying the right SONAME sitting on the
+        # command line. The DT_NEEDED entries below (and the gate's clause 4)
+        # are what keep that from being a licence to leave anything undefined:
+        # the ELF still says where every missing symbol comes from.
+        target_link_options(${_TARGET} PRIVATE
+            "-Wl,-z,undefs"
+            "-Wl,--no-as-needed" ${LOGOS_VIEW_LINK_HOST_ABI} "-Wl,--as-needed")
+    else()
+        # THE LINK THAT IS NOT A LINK.
+        # `-fixup_chains` is the spike's variant B: a modern fixup format and no
+        # dependency on the app being linked first. The deprecation warning on
+        # `-undefined dynamic_lookup` is Apple's and is expected.
+        target_link_options(${_TARGET} PRIVATE
+            "-Wl,-undefined,dynamic_lookup"
+            "-Wl,-fixup_chains"
+            "-Wl,-headerpad_max_install_names")
+        set_target_properties(${_TARGET} PROPERTIES
+            INSTALL_NAME_DIR "@rpath"
+            BUILD_WITH_INSTALL_NAME_DIR TRUE)
+    endif()
 
     install(TARGETS ${_TARGET}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
         RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/logos/view
     )
 
-    message(STATUS "Logos view framework ${_TARGET}: ${LOGOS_REP_CLASS} from "
-                   "${VIEW_REP_FILE}, QML at ${LOGOS_VIEW_QML_URL}, Qt bound upward")
+    if(_VIEW_ANDROID)
+        message(STATUS "Logos view image ${_TARGET}: ${LOGOS_REP_CLASS} from "
+                       "${VIEW_REP_FILE}, QML at ${LOGOS_VIEW_QML_URL}, Qt by soname")
+    else()
+        message(STATUS "Logos view framework ${_TARGET}: ${LOGOS_REP_CLASS} from "
+                       "${VIEW_REP_FILE}, QML at ${LOGOS_VIEW_QML_URL}, Qt bound upward")
+    endif()
 endfunction()
 
 #[=======================================================================[.rst:
@@ -1675,8 +1781,9 @@ function(logos_module)
         return()
     endif()
 
-    # LOGOS_MODULE_VIEW_FRAMEWORK switches a `type: ui_qml` module to its iOS
-    # framework shape and returns, for the same reason and in the same place:
+    # LOGOS_MODULE_VIEW_FRAMEWORK switches a `type: ui_qml` module to its MOBILE
+    # shape -- an iOS framework or an Android .so, decided in there by the
+    # target platform -- and returns, for the same reason and in the same place:
     # the artifact is the same sources with a different link, so it cannot be
     # produced by patching the plugin target after the fact.
     if(LOGOS_MODULE_VIEW_FRAMEWORK)
