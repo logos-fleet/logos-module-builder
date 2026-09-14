@@ -275,7 +275,16 @@
           # its include in step. Nothing is edited by hand and there is no second
           # fixture to keep up to date -- the reason the first one is exported
           # rather than copied in the first place.
-          renamedWebViewCounter = name:
+          #
+          # AND THE MODULE IT CALLS MOVES WITH IT. The fixture's one
+          # cross-module call names `greeter`, a Bare fixture that the
+          # container checks load beside it and that nothing on a phone
+          # carries -- so on a device that call dies at MODULE_NOT_LOADED
+          # before capability_module's 4.7.3 consent gate ever sees it. A
+          # build meant to be INSTALLED has to call a module the host's
+          # Bundled set actually has, which is why the target is an
+          # argument here rather than a constant in the QML.
+          renamedWebViewCounter = { name, callTarget, callMethod, callArgs }:
             let
               src = pkgs.runCommand "logos-${name}-src" { } ''
                 cp -r ${./tests/fixtures/web-view-counter} $out
@@ -294,6 +303,22 @@
                 done
                 grep -q '"name": "${name}"' $out/metadata.json \
                   || { echo "error: the rename did not reach metadata.json" >&2; exit 1; }
+
+                # The three lines the fixture declares its cross-module call
+                # on. Rewritten by an anchored substitution rather than a
+                # global one, and every one of them is then asserted: a view
+                # whose call silently stayed pointed at `greeter` would
+                # install, run, render -- and fail the one thing it was built
+                # under a second name to show.
+                qml=$out/src/qml/Counter.qml
+                sed -i 's|callTarget: "greeter"|callTarget: "${callTarget}"|' "$qml"
+                sed -i 's|callMethod: "greet"|callMethod: "${callMethod}"|' "$qml"
+                sed -i 's|callArgs: \["logos"\]|callArgs: ${callArgs}|' "$qml"
+                for want in 'callTarget: "${callTarget}"' 'callMethod: "${callMethod}"' \
+                            'callArgs: ${callArgs}'; do
+                  grep -qF "$want" "$qml" \
+                    || { echo "error: the call rewrite missed: $want" >&2; exit 1; }
+                done
               '';
               # REALISED BEFORE IT IS USED AS A SOURCE, and that is not a
               # nicety: mkLogosQmlModule finds a module's QML directory with
@@ -307,7 +332,19 @@
               src = realised;
               configFile = "${realised}/metadata.json";
             }).packages.${system};
-          webViewCounterB = renamedWebViewCounter "web_counter_b";
+          # THE SECOND COUNTER IS THE ONE THAT GETS INSTALLED -- logos-basecamp's
+          # local catalog release publishes it and its Store shell downloads it
+          # -- so its call names `package_manager`, a module every Store shell
+          # carries (a shell without the package modules has no catalog to
+          # install from at all). `getInstalledPackages` takes no arguments and
+          # answers a list, so a refusal and an answer are told apart by the
+          # SHAPE of the reply rather than by its contents.
+          webViewCounterB = renamedWebViewCounter {
+            name = "web_counter_b";
+            callTarget = "package_manager";
+            callMethod = "getInstalledPackages";
+            callArgs = "[]";
+          };
         in
         {
           rust-sdk-src = pkgs.runCommand "logos-rust-sdk-src" {} "cp -r ${logos-rust-sdk} $out";

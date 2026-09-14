@@ -36,6 +36,39 @@ Rectangle {
     property int seen: -1
     property string callResult: ""
 
+    // WHICH MODULE THIS VIEW CALLS, in one place and nowhere else.
+    //
+    // `greeter` is a fixture module that only the container checks load, which
+    // is right for THEM and wrong for a phone: a Downloaded module installed on
+    // a device has to call something the app's Bundled set actually carries, or
+    // the call dies at MODULE_NOT_LOADED before capability_module's consent
+    // gate ever sees it. flake.nix's `renamedWebViewCounter` rewrites these
+    // three lines when it builds this source under a second name -- so there is
+    // one fixture, and the target is the only thing that differs.
+    readonly property string callTarget: "greeter"
+    readonly property string callMethod: "greet"
+    readonly property var callArgs: ["logos"]
+    // How many refusals to sit through before giving up. Bounded, because a
+    // module nobody ever answers for must not retry for the life of the app.
+    readonly property int callMaxAttempts: 30
+
+    property int callAttempts: 0
+    property bool callInFlight: false
+
+    // A FAILURE IS AN OBJECT WITH `error` IN IT; a success is the bare return
+    // value (logos_view_wasm_host.cpp's errorPayload). Parsed rather than
+    // string-matched: a successful call whose result happens to contain the
+    // word "error" is a success.
+    function isRefusal(payload) {
+        try {
+            var v = JSON.parse(payload)
+            return v !== null && typeof v === "object" && !Array.isArray(v)
+                   && v.error !== undefined
+        } catch (e) {
+            return false
+        }
+    }
+
     color: Theme.palette.background
 
     function takeBackend() {
@@ -162,13 +195,55 @@ Rectangle {
     // A call to ANOTHER module, made from the view. Driven by a timer rather
     // than a button because what it proves is the route, and the route is the
     // same whoever starts it.
+    //
+    // IT RETRIES WHILE IT IS BEING REFUSED, and that is not padding. A call
+    // between a Downloaded module and anything else is gated by
+    // capability_module on guideline 4.7.3: the FIRST attempt is refused while
+    // it announces `consentRequired`, and the answer the user then gives is
+    // carried by the caller's NEXT attempt -- capability_module cannot hold a
+    // dispatch thread open for as long as a person takes to read a dialog. A
+    // fixture that called once could therefore only ever show the refusal, and
+    // never the grant that follows it.
+    //
+    // AN ANSWER STOPS IT. Only a refusal is retried, so a container where the
+    // call simply works (the browser end-to-end check, the desktop container
+    // check) sees exactly ONE call, which is what those two assert.
     Timer {
+        id: callTimer
         interval: 400
         running: true
-        repeat: false
-        onTriggered: logos.callModuleAsync("greeter", "greet", ["logos"], function (payload) {
-            root.callResult = payload
-            console.log("logos-view: callModuleAsync -> " + payload)
-        }, 5000)
+        repeat: true
+        onTriggered: {
+            // One in flight at a time: the retry interval is shorter than the
+            // call timeout, and a second attempt would race the first's answer.
+            if (root.callInFlight)
+                return
+            if (root.callAttempts >= root.callMaxAttempts) {
+                callTimer.stop()
+                console.log("logos-view: callModuleAsync gave up after "
+                            + root.callAttempts + " refused attempt(s)")
+                return
+            }
+            // The FIRST attempt keeps the 400 ms this fixture has always made
+            // it at; the retries are slower, because each one is a real round
+            // trip through the container and the broker.
+            callTimer.interval = 2000
+            root.callInFlight = true
+            root.callAttempts += 1
+            var attempt = root.callAttempts
+            logos.callModuleAsync(root.callTarget, root.callMethod, root.callArgs,
+                                  function (payload) {
+                root.callInFlight = false
+                root.callResult = payload
+                console.log("logos-view: callModuleAsync -> " + payload)
+                if (root.isRefusal(payload)) {
+                    console.log("logos-view: callModuleAsync refused on attempt " + attempt
+                                + "; retrying " + root.callTarget + "." + root.callMethod)
+                    return
+                }
+                callTimer.stop()
+                console.log("logos-view: callModuleAsync answered on attempt " + attempt)
+            }, 5000)
+        }
     }
 }
