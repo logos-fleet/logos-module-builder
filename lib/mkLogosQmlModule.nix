@@ -232,17 +232,18 @@ let
     '') // { inherit src; version = config.version; };
 
 
-  # ── the ui_qml module on iOS ──────────────────────────────────────────────
-  # `nix build .#packages.aarch64-ios.view`: the SAME module as the desktop Qt
-  # plugin, cross-compiled into one embedded framework that carries its Qt
-  # backend and its QML and binds Qt upward into the app image. The Native
-  # container loads it, the host instantiates the view object in-process (there
-  # is no ui-host subprocess on a phone) and the QML renders in the host's own
-  # engine.
+  # ── the ui_qml module on a phone ──────────────────────────────────────────
+  # `nix build .#packages.aarch64-ios.view` (and the sim / Android keys): the
+  # SAME module as the desktop Qt plugin, cross-compiled into ONE image that
+  # carries its Qt backend and its QML and reaches the app's Qt rather than
+  # carrying a copy. The Native container loads it, the host instantiates the
+  # view object in-process (there is no ui-host subprocess on a phone) and the
+  # QML renders in the host's own engine.
   #
-  # Only `view`, and only on the iOS keys. See buildViewFramework.nix for why
-  # Android is not the same artifact, and mkLogosModule's mobileBareFor for why
-  # the mobile keys carry one output rather than joining forAllSystems.
+  # buildViewFramework reads the SHAPE off the package set — an iOS embedded
+  # framework, an Android `lib<name>_view.so` — so nothing here says
+  # "framework". Only `view`: see mkLogosModule's mobileBareFor for why the
+  # mobile keys carry one output rather than joining forAllSystems.
   #
   # THE GENERATED TREE COMES FROM THE BUILD PLATFORM, for the same reason the
   # mobile Bare artifact's does: `generate` is source plus everything the code
@@ -261,9 +262,9 @@ let
           # and the host loads it directly.
           refuseQmlOnly = throw ("logos-module-builder: module '"
             + mobileConfig.name + "' is QML-only (no `main` in metadata.json), "
-            + "so it has no iOS `view` framework. A view framework IS the "
-            + "module's compiled Qt backend; with no backend there is nothing "
-            + "to bind Qt upward and the QML travels in the module's LGX.");
+            + "so it has no mobile `view` image. A view image IS the module's "
+            + "compiled Qt backend; with no backend there is nothing to bind "
+            + "to the app's Qt and the QML travels in the module's LGX.");
 
           # `view` is "qml/Main.qml" (a path relative to src/ or to the project
           # root); the framework's qrc is built from the DIRECTORY and entered
@@ -277,19 +278,20 @@ let
             if resolved != null then resolved
             else throw ("logos-module-builder: module '" + mobileConfig.name
               + "' declares view \"" + mobileConfig.view + "\" but neither src/"
-              + viewDirRel + " nor " + viewDirRel + " exists. The iOS framework "
+              + viewDirRel + " nor " + viewDirRel + " exists. The view image "
               + "compiles that directory into its own qrc, so there is nothing "
               + "to put in it.");
 
           refuseExternalLibs = throw ("logos-module-builder: module '"
-            + mobileConfig.name + "' cannot be built as an iOS view framework "
+            + mobileConfig.name + "' cannot be built as a mobile view image "
             + "yet: it declares nix.external_libraries ("
             + lib.concatStringsSep ", " (mkExternalLib.getExternalLibNames mobileConfig)
             + "). Those are staged into lib/ as BUILD-platform images by the "
             + "module's own `generate` step and nothing here can recompile "
             + "them — each comes from its own flake, which has to publish a "
             + "package for " + system + ".");
-        in lib.optionalAttrs (pkgs.stdenv.hostPlatform.isiOS or false) {
+        in lib.optionalAttrs ((pkgs.stdenv.hostPlatform.isiOS or false)
+                             || (pkgs.stdenv.hostPlatform.isAndroid or false)) {
           view =
             if !hasBackend then refuseQmlOnly
             else if mkExternalLib.hasExternalLibs mobileConfig then refuseExternalLibs
@@ -313,9 +315,21 @@ let
             };
         });
 
+  # The canonical view, keyed the way logos-nix keys its own mobile targets.
   viewFrameworkPackages = viewFrameworkFor {
     androidBuildSystem = common.defaultAndroidBuildSystem;
   };
+
+  # ...and one per Android build platform, because a cross derivation's
+  # `system` is its BUILD platform: `packages.aarch64-android` above is
+  # x86_64-linux and cannot be REALISED on a Mac even though the Mac builds the
+  # identical closure. Same shape, same reason and the same attribute name as
+  # mkLogosModule's `mobileBareLegacyPackages` -- so a consumer reaches a
+  # module's mobile artifact through one spelling whichever kind it is.
+  # `common.androidBuildSystems` is [] exactly when the mobile targets are off,
+  # so this is empty in the same breath `packages` loses its mobile keys.
+  viewFrameworkLegacyPackages = lib.genAttrs common.androidBuildSystems
+    (androidBuildSystem: { mobile = viewFrameworkFor { inherit androidBuildSystem; }; });
 
   # ── the `web` variant ───────────────────────────────────────────────────────
   #
@@ -522,9 +536,10 @@ let
   ) packages;
 
 in {
-  # The iOS keys are MERGED rather than folded into forAllSystems: they carry
+  # The mobile keys are MERGED rather than folded into forAllSystems: they carry
   # `view` and nothing else. See viewFrameworkFor above.
   packages = mergedPackages // viewFrameworkPackages;
+  legacyPackages = viewFrameworkLegacyPackages;
   checks = lib.mapAttrs (_: sysPkgs: {
     integration-test = sysPkgs.integration-test;
   }) integrationTestPackages;

@@ -598,6 +598,15 @@
           mkLogosQmlModule = lib.mkLogosQmlModule;
           fixturesRoot = ./tests/fixtures;
         };
+        # ...and the Android half of the same output: the same ui_qml module
+        # as a plain lib<stem>_view.so that names the app's Qt in DT_NEEDED
+        # rather than binding it upward. Same aarch64-darwin key, because the
+        # Android leg is instantiated from this build platform.
+        view-module-android = import ./tests/test-view-module-android.nix {
+          inherit pkgs;
+          mkLogosQmlModule = lib.mkLogosQmlModule;
+          fixturesRoot = ./tests/fixtures;
+        };
       });
 
       # Development shell for working on the builder itself

@@ -15,10 +15,11 @@
 #   LC_BUILD_VERSION, and no Versions/ tree (which iOS refuses and codesign
 #   will not sign).
 #
-# ...plus the two refusals that keep the output honest, both at EVAL:
-#   a QML-only ui_qml module has no backend to compile, so no framework;
-#   the aarch64-android key carries no `view` at all, because Android's Qt is
-#   shared objects and the artifact there is a different one.
+# ...plus the one refusal that keeps the output honest, at EVAL: a QML-only
+# ui_qml module has no backend to compile, so no framework.
+#
+# The Android `view` — a plain lib<stem>_view.so, the same module with a link
+# instead of no link — is tests/test-view-module-android.nix.
 #
 # aarch64-darwin only: iOS cannot be cross-compiled from anywhere else.
 { pkgs, mkLogosQmlModule, fixturesRoot }:
@@ -49,15 +50,8 @@ let
     then builtins.throw "FAIL: a QML-only ui_qml module must not offer an iOS view framework"
     else true;
 
-  androidHasNoView =
-    if (mkFixture "view-counter-module").packages.aarch64-android ? view
-    then builtins.throw ("FAIL: the aarch64-android key must carry no `view` — "
-      + "Android's Qt is shared objects and the artifact there is a different one")
-    else true;
-
 in
 assert qmlOnlyRefused;
-assert androidHasNoView;
 pkgs.runCommand "view-framework-ios-tests" {
   nativeBuildInputs = [ pkgs.darwin.cctools ];
 } ''
@@ -124,6 +118,5 @@ pkgs.runCommand "view-framework-ios-tests" {
   echo "PASS: the desktop ui_qml plugin and its QML are unchanged"
 
   echo "PASS: a QML-only ui_qml module is refused an iOS view framework"
-  echo "PASS: the aarch64-android key carries no view output"
   touch $out/ok
 ''
