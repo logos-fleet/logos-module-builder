@@ -196,11 +196,8 @@ public:
         for (const RpcValue& a : req.args) args.push_back(rpcValueToJson(a));
 
         // WHO IS CALLING, for the duration of this dispatch and no longer. The
-        // module's language binding surfaces it as logos::currentCaller(). A
-        // web-transport peer is a module only once it has presented a token
-        // this image was told about; before that it is genuinely unknown, and
-        // saying so is the whole point of the "unknown" arm.
-        const std::string caller = callerJson(req.authToken);
+        // module's language binding surfaces it as logos::currentCaller().
+        const std::string caller = callerJson(req);
         logos_module_set_call_caller(caller.c_str());
         char* out = logos_module_dispatch(req.method.c_str(), args.dump().c_str());
         logos_module_set_call_caller(nullptr);
@@ -375,9 +372,34 @@ private:
 
     // The document logos_module_set_call_caller takes. See its declaration in
     // logos_module_impl.h for the normative definition of each arm.
-    std::string callerJson(const std::string& authToken) const
+    //
+    // THE CALL'S OWN `caller` FIELD WINS, and it has to. The token is not an
+    // identity on this wire: a host relaying a call into this image presents
+    // THIS MODULE'S root credential -- the only one it holds -- so the
+    // token-owner derivation below answers this image ITS OWN NAME for every
+    // caller in the fleet. Measured on a device: keystore_module.caller_identity(),
+    // asked by wallet_ui, answered `module "keystore_module"`, and every
+    // name-gated method on that module then refused everybody
+    // (logos-workspace#129). So the relay names the caller as DATA beside the
+    // token, and that is what a handler reads.
+    //
+    // BELIEVED BECAUSE OF THE CHANNEL, not because of the document. This image
+    // has exactly one message port and its far end is the container (ADR 0005);
+    // nothing else can write it, so a caller document on it is the container's
+    // statement rather than a peer's claim. The token was already checked by
+    // the authorized() gate above before this is read.
+    //
+    // THE FALLBACK IS THE OLD DERIVATION, for a peer that predates the field --
+    // a `caller` is ABSENT, never empty, when nobody named one. It is honest
+    // for the one shape it was ever right for (a peer that talks to this image
+    // directly with its own token, which the test harness and a future
+    // page-to-page door both are) and it is what stops this change from turning
+    // every such caller into `unknown`.
+    std::string callerJson(const CallMessage& req) const
     {
-        const auto it = m_tokenOwner.find(authToken);
+        if (!req.caller.empty()) return req.caller;
+
+        const auto it = m_tokenOwner.find(req.authToken);
         if (it == m_tokenOwner.end() || it->second.empty())
             return R"({"kind":"unknown"})";
         json o;

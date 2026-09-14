@@ -1,5 +1,7 @@
 #include "bare_counter_impl.h"
 
+#include <logos_caller.h>
+
 #include <fstream>
 #include <iterator>
 
@@ -69,6 +71,21 @@ std::string BareCounterImpl::recall()
     std::ifstream in(root + kNote, std::ios::binary);
     if (!in) return {};
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string BareCounterImpl::callerIdentity()
+{
+    const logos::LogosCaller caller = logos::currentCaller();
+    switch (caller.kind) {
+    case logos::CallerKind::Host:     return "host";
+    case logos::CallerKind::Module:   return "module:" + caller.name;
+    case logos::CallerKind::Derived:  return "derived:" + caller.parent + "/" + caller.leaf;
+    case logos::CallerKind::Operator: return "operator:" + caller.name;
+    case logos::CallerKind::Unknown:  break;
+    }
+    // In band, like every other arm: a caller that could not be named is a
+    // value the test can assert on, not an empty string.
+    return "unknown";
 }
 
 void BareCounterImpl::panic()
