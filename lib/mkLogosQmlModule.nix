@@ -345,6 +345,18 @@ let
   # the `web` output off.
   webViewQmlDir = qmlDirFor config.view;
 
+  # ── AND `platform: true` (ADR 0009) ─────────────────────────────────────────
+  #
+  # A view module that owns access the webview cannot provide gets no `web`
+  # variant either, and it needs no gate here to say so: a `web` view is built
+  # only from a DECLARED `web.view_backend`, and parseMetadata refuses that
+  # declaration next to `platform: true` by name, at eval, where the
+  # contradiction is written. A Platform view module that declares no backend
+  # already falls out of the list below with `cfg.web_view_backend == null`.
+  #
+  # Stated rather than re-implemented, so that a reader looking for the ADR's
+  # gate on this path finds why there is nothing to find.
+
   # SIX THINGS HAVE TO BE TRUE, and each absence is a real state rather than an
   # error: the module has a C++ backend at all, it DECLARED one that is
   # separable from its plugin (`web.view_backend` — see parseMetadata for why it

@@ -248,6 +248,40 @@ The build system copies the view directory (e.g. `qml/`) alongside the plugin `.
 "view": "qml/Main.qml"
 ```
 
+### `platform`
+**Type:** boolean
+**Default:** `false`
+
+Declares that the module **owns access a webview cannot provide** — raw TCP/UDP,
+background execution, a secure enclave, a device radio. A `platform: true`
+module is always part of a shell's Bundled set and the builder gives it **no
+`web` variant**: neither `nix build .#web` nor `.#<name>-web` exists.
+
+```json
+"platform": true
+```
+
+Declared, never inferred. The tempting rule is to read it off the crate list — a
+module linking `reqwest` with `socks` plainly opens a socket — but the *same*
+crate with the `js` feature is the correct way to fetch from wasm, so the
+inference is wrong in both directions and both of its failures are silent: it
+either drops a `web` variant that worked or ships one that dies on the phone.
+Intent is not in the dependency list, so the author writes it down.
+
+It may **not** be platform-keyed by a `platforms` overlay: a module whose
+platform access depends on the target is two modules.
+
+Writing it together with a `web` block (`web.view_backend` or
+`web.dependencies`) is refused by name at eval — the two say opposite things
+about the same output. The output itself is simply *absent* rather than a
+throwing attribute, so a shell that enumerates module variants loses one entry
+instead of failing to evaluate.
+
+> A second, temporary gate sits beside this one: a module with `dependencies`
+> gets a `web` variant only once the pinned `logos-protocol` wasm subset can
+> make an outbound call (its `hasOutboundDoor` passthru). That one heals on a
+> pin bump with no edit in any module's flake.
+
 ### `web.view_backend`
 **Type:** object
 **Default:** null (only meaningful for `type == "ui_qml"`)

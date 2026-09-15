@@ -437,6 +437,22 @@ holding a `LogosAPI` and has no protocol-free form to compile. A `ui_qml`
 module gets a `web` output too, but a **different** one — see below; the two
 can never collide, because the two admission rules are disjoint by module type.
 
+**Two further gates decide whether the output exists at all** (ADR 0009). Each
+makes the output *absent* rather than an attribute that throws, so a consumer's
+`packages.<sys>.web or null` keeps working:
+
+| Gate | Written where | Lifts when |
+|---|---|---|
+| `platform: true` — the module owns access a webview cannot provide | the module's `metadata.json` | never; it is architectural |
+| the module has `dependencies` and the pinned `logos-protocol` wasm subset cannot make an outbound call | the *pin*, as `logos-protocol-wasm`'s `hasOutboundDoor` passthru | the day the protocol ships a client side — with no edit in any module's flake |
+
+The second is keyed on the pin and not on `dependencies != []`, because having
+dependencies is exactly what a Downloaded module built on top of a Platform
+module does: a rule keyed on the module would have to be un-written the day the
+door lands, and the modules it wrongly refused would stay refused until someone
+remembered to. A module that writes `"web": { "dependencies": [] }` says its
+image is a leaf and calls nobody, and builds today.
+
 The container is unchanged and is not wasm-aware. It opens `main` in a webview
 and relays the web transport across its bridge; the page relays that to the
 Worker's port. That is why the same variant runs behind a `WKWebView` on a

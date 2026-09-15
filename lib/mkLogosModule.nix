@@ -1023,8 +1023,54 @@ let
       # the same reason: a builder with no rust-overlay input cannot produce
       # one, and `web` is then an output that does not exist rather than an
       # eval error.
+
+      # ── CAN THE PINNED PROTOCOL MAKE AN OUTBOUND CALL? ────────────────────
+      #
+      # A wasm image SERVES calls; `lp_client_create` and `lp_invoke` live in a
+      # source file the wasm subset does not compile, so a module that calls a
+      # dependency has nothing to link against and wasm-ld reports an undefined
+      # symbol deep inside an emcc command. Read off the protocol package as a
+      # passthru rather than inferred from anything here, because it is a
+      # property of the PIN: the day the client side lands, this answers true
+      # and gate 2 below opens with no edit in any module's flake.
+      #
+      # `or false` and never a throw. A pin that predates the attribute is a pin
+      # without the door — which is what a missing attribute means — and an
+      # absent output is something a consumer can route around, while a throwing
+      # one takes its whole flake down at eval.
+      hasOutboundDoor =
+        if logosProtocolWasmPkg == null then false
+        else logosProtocolWasmPkg.hasOutboundDoor or false;
+
+      # ── THE TWO GATES ON A `web` VARIANT (ADR 0009) ───────────────────────
+      #
+      # 1. PERMANENT, and architectural. A module that declares `platform: true`
+      #    owns access the webview cannot provide — raw TCP/UDP, background
+      #    execution, a secure enclave — so it is always part of a shell's
+      #    Bundled set and there is no such thing as a `web` build of it. Nothing
+      #    here infers that from the crate list: `reqwest` with the `js` feature
+      #    is legitimate in wasm, so the dependency list cannot carry intent and
+      #    the author declares it (parseMetadata's `platform`).
+      #
+      # 2. TEMPORARY, and it heals on a pin bump. A module with dependencies
+      #    needs the outbound door above to call them. Keyed on the PROTOCOL PIN
+      #    and not on `dependencies != []` alone, because having dependencies is
+      #    exactly what a Downloaded module built on top of a Platform module
+      #    does — a rule keyed on that would have to be un-written the day the
+      #    door lands, and the modules it wrongly refused would stay refused
+      #    until someone remembered to.
+      #
+      #    `config.web_dependencies` rather than `config.dependencies`: a `web`
+      #    variant may declare its own list (metadata `web.dependencies`), and a
+      #    module that writes `"web": { "dependencies": [] }` is saying its image
+      #    is a leaf and calls nobody. That is the one shape that can be built
+      #    today, and it should be buildable by saying so.
+      #
+      # Null, not a throw, for the reason given on `hasOutboundDoor`.
       webVariant =
         if logosProtocolWasmPkg == null then null
+        else if config.platform then null
+        else if config.web_dependencies != [ ] && !hasOutboundDoor then null
         else if isRustModule && rustStaticLibWasm == null then null
         else buildWebModule {
           inherit pkgs config builderRoot logosSdk;

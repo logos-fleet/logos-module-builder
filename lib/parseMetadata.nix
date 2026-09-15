@@ -115,6 +115,61 @@ in
                        + "base list, so a name written in both arrives twice; `modules()` "
                        + "has one member per name. Keep the entry in one place.");
 
+      # ── PLATFORM ACCESS, DECLARED (ADR 0009) ──────────────────────────────
+      #
+      # `"platform": true` means: this module owns access a webview cannot give
+      # it — raw TCP/UDP, background execution, a secure enclave, a device
+      # radio. It is therefore always part of a shell's Bundled set, and the
+      # builder gives it NO `web` variant (mkLogosModule's `webVariant`, and the
+      # same gate on a ui_qml module's web output).
+      #
+      # DECLARED, NEVER INFERRED, and that is the decision worth restating here
+      # rather than only in the ADR. The tempting rule is to read it off the
+      # crate list — a module linking `reqwest` with `socks` plainly opens a
+      # socket. But the SAME crate with the `js` feature is the correct way to
+      # fetch from wasm, so the inference is wrong in both directions and both
+      # of its failures are silent: it either drops a `web` variant that worked
+      # or ships one that dies on the phone. Intent is not in the dependency
+      # list, so the author writes it down.
+      #
+      # `false` when absent, which is what every module written before this key
+      # means: it gets exactly the outputs it got before.
+      platform_ =
+        let declared = raw.platform or false; in
+        if builtins.isBool declared then declared
+        else throw ("metadata.json: `platform` must be true or false in module "
+                    + "'${raw.name or "?"}', got: ${builtins.toJSON declared}. It "
+                    + "declares that the module owns access a webview cannot "
+                    + "provide (raw sockets, background execution, a secure "
+                    + "enclave), which is why it is always Bundled and has no "
+                    + "`web` variant.");
+
+      # ── ASKING FOR A `web` VARIANT WHILE DECLARING PLATFORM ACCESS ────────
+      #
+      # The two gates in mkLogosModule make a `platform: true` module's `web`
+      # output simply ABSENT rather than a throwing attribute, and that is
+      # deliberate: a consumer writes `pkgs.web or null`, and `or` cannot catch a
+      # value that throws — one refused module would take a whole shell's flake
+      # down at eval instead of leaving it one variant short.
+      #
+      # Absence is silent, though, and silence is the wrong answer to an author
+      # who WROTE a `web` block. Declaring `web.view_backend` or
+      # `web.dependencies` is asking for the variant in so many words, so that
+      # ask is refused BY NAME, here, where the contradiction is — rather than
+      # being dropped on the floor and discovered as a missing output months
+      # later, or (before these gates existed) as an undefined symbol at
+      # wasm-ld.
+      refuseWebWhenPlatform = key:
+        throw ("metadata.json: module '${raw.name or "?"}' declares `platform: "
+               + "true` and `web.${key}`. A module that owns access the webview "
+               + "cannot provide -- raw sockets, background execution, a secure "
+               + "enclave -- gets no `web` variant at all (ADR 0009), so the "
+               + "`web` block has nothing to configure. Drop one of the two: "
+               + "remove `web.${key}` if the module really is a Platform module "
+               + "and belongs in every shell's Bundled set, or drop `platform: "
+               + "true` if its access is reachable from a Web container after "
+               + "all.");
+
       type_       = raw.type or "core";
       interface_  = raw.interface or "legacy";
       codegen_    = let c = raw.codegen or {}; in if builtins.isAttrs c then c else {};
@@ -443,6 +498,10 @@ in
       # interface used to be the other consumer.
       codegen = raw.codegen or {};
 
+      # See `platform_` in the let block above for what this declares and why
+      # it is not inferred.
+      platform = platform_;
+
       # ── the `web` variant of a `type: ui_qml` module ──────────────────────
       #
       # `web.view_backend` is what makes a view module downloadable onto a Store
@@ -477,6 +536,7 @@ in
                         + "QObject the module's Qt-wasm view backend hosts.");
         in
         if declared == null then null
+        else if platform_ then refuseWebWhenPlatform "view_backend"
         else if !(builtins.isAttrs declared) then
           throw ("metadata.json: web.view_backend must be an object in module "
                  + "'${raw.name or "?"}', got: ${builtins.toJSON declared}")
@@ -514,6 +574,7 @@ in
         let declared = ((raw.web or {}).dependencies or null); in
         if declared == null then
           noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
+        else if platform_ then refuseWebWhenPlatform "dependencies"
         else if !(builtins.isList declared) then
           throw ("metadata.json: web.dependencies must be a list of module names in "
                  + "module '${raw.name or "?"}', got: ${builtins.toJSON declared}")

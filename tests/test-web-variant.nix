@@ -51,7 +51,17 @@
 # name on the first unresolved symbol. There is nothing to check afterwards —
 # and nothing that COULD be checked, since wasm-opt minifies the export names
 # and a linked image's symbol table is seven single letters.
-{ pkgs, mkLogosModule, fixturesRoot }:
+#
+#   * THE TWO GATES OF ADR 0009. A module that declares `platform: true` gets no
+#     `web` output at all, and a module with dependencies gets one only when the
+#     PINNED protocol can make an outbound call. Both are pure evaluation and
+#     both are differential against the counter this file realises below.
+{ pkgs, mkLogosModule, fixturesRoot
+, # Does the pinned logos-protocol's wasm subset define lp_client_create /
+  # lp_invoke? Passed in rather than read here, because this file is handed
+  # `pkgs` and not the protocol flake -- and because the assertion below is
+  # "the `web` output follows the pin", which needs the pin as an input.
+  hasOutboundDoor ? false }:
 
 let
   counter = mkLogosModule {
@@ -72,20 +82,80 @@ let
   # gets THIS one, the Bare Wasm host, and the two admission rules cannot
   # collide: `packaged_as_cdylib` is false for every ui_qml module, and
   # `web.view_backend` is refused on everything that is not one.
-  noWeb = label: fixture:
-    let m = mkLogosModule {
-          src = fixturesRoot + "/${fixture}";
-          configFile = fixturesRoot + "/${fixture}/metadata.json";
-        };
-    in if m.packages.${system} ? web
-       then builtins.throw "FAIL: ${label} (${fixture}) must not expose a `web` output"
-       else true;
+  noWebFor = label: m:
+    let pkgsOf = m.packages.${system}; in
+    if pkgsOf ? web
+    then builtins.throw "FAIL: ${label} must not expose a `web` output"
+    else if pkgsOf ? "${m.config.name}-web"
+    then builtins.throw ("FAIL: ${label} must not expose a `"
+                         + "${m.config.name}-web` output either -- the two names "
+                         + "are one output and dropping only the short one leaves "
+                         + "the variant reachable")
+    else true;
+
+  moduleAt = fixture: configFixture: mkLogosModule {
+    src = fixturesRoot + "/${fixture}";
+    configFile = fixturesRoot + "/${configFixture}/metadata.json";
+  };
+
+  noWeb = label: fixture: noWebFor "${label} (${fixture})" (moduleAt fixture fixture);
 
   qtPluginsHaveNoWeb =
     noWeb "a hand-written Qt core module" "test-framework-module"
     && noWeb "a QML-only ui_qml module" "qml-module";
 
-in assert qtPluginsHaveNoWeb; pkgs.runCommand "web-variant-tests" {
+  # ── ADR 0009 GATE 1: `platform: true` ────────────────────────────────────
+  #
+  # THE SAME SOURCES AS `counter` ABOVE, under a metadata file that adds one
+  # key. `counter.packages.<sys>.web` is realised further down this file, so the
+  # pair is a differential: the only thing that can account for the absence here
+  # is the declaration, and the fixture cannot rot into a module that has no
+  # `web` output for some other reason without the positive half failing first.
+  #
+  # And the gate is SURGICAL -- the Platform module keeps its `bare` artifact,
+  # which is the form it actually ships in. A gate that took that too would
+  # remove the module from every phone instead of from the Store.
+  platformCounter = moduleAt "bare-counter" "bare-counter-platform";
+  platformModuleHasNoWeb =
+    noWebFor "a module declaring `platform: true`" platformCounter;
+  platformModuleKeepsBare =
+    if platformCounter.packages.${system} ? bare then true
+    else builtins.throw ("FAIL: a `platform: true` module must keep its `bare` "
+                         + "output -- it is always part of a shell's Bundled set");
+
+  # ── ADR 0009 GATE 2: dependencies, against the pinned protocol ───────────
+  #
+  # `bare_relay` calls `bare_counter` through modules(), so its image needs
+  # `lp_invoke` -- which the wasm subset does not define (logos-protocol
+  # nix/wasm.nix, `hasOutboundDoor`). Before this gate the module published a
+  # `web` output that could only ever fail at wasm-ld.
+  #
+  # Asserted as a FUNCTION OF THE PIN and not as a flat "modules with
+  # dependencies have no web output": the day logos-protocol ships the client
+  # side, `hasOutboundDoor` is true, the output comes back, and this assertion
+  # follows it rather than having to be deleted. test-bare-modules.nix pins the
+  # other half -- that the Bare artifact leaves lp_invoke undefined on purpose.
+  relay = moduleAt "bare-relay" "bare-relay";
+  relayWebMatchesThePin =
+    let
+      hasDoor = hasOutboundDoor;
+      hasWeb = relay.packages.${system} ? web;
+    in
+    if hasDoor == hasWeb then true
+    else if hasDoor
+    then builtins.throw ("FAIL: the pinned logos-protocol declares an outbound "
+                         + "door, so a module with dependencies must get a `web` "
+                         + "output again -- bare_relay has none")
+    else builtins.throw ("FAIL: the pinned logos-protocol wasm subset cannot make "
+                         + "an outbound call, so bare_relay (which calls "
+                         + "bare_counter) must have no `web` output; it has one, "
+                         + "and it can only fail at wasm-ld");
+
+in assert qtPluginsHaveNoWeb;
+   assert platformModuleHasNoWeb;
+   assert platformModuleKeepsBare;
+   assert relayWebMatchesThePin;
+   pkgs.runCommand "web-variant-tests" {
   nativeBuildInputs = [ pkgs.nodejs ];
 } ''
   set -euo pipefail

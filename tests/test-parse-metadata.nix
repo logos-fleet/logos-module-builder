@@ -1114,4 +1114,63 @@ in [
   (assertThrows "web.view_backend must be an object"
     (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","web":{"view_backend":"B"}}'')
       .web_view_backend)
+
+  # --- platform: declared platform access (ADR 0009) ------------------------
+  #
+  # ABSENT IS FALSE, and that is the whole compatibility story: every module
+  # written before this key keeps exactly the outputs it had. The builder turns
+  # `true` into "no `web` variant" (mkLogosModule's `webVariant`); what is
+  # pinned here is the DECLARATION -- that it is read, that it is a boolean, and
+  # that it is refused where it contradicts itself.
+  (assertBool "platform defaults to false"
+    (parse ''{"name":"m","type":"core"}'').platform false)
+
+  (assertBool "platform: true is read"
+    (parse ''{"name":"m","type":"core","platform":true}'').platform true)
+
+  (assertBool "platform: false is read"
+    (parse ''{"name":"m","type":"core","platform":false}'').platform false)
+
+  # A STRING IS THE LIKELY MISTAKE, and `if config.platform then` would take
+  # "false" as true -- a module that declared itself NOT a Platform module and
+  # silently lost its `web` variant.
+  (assertThrows "platform must be a boolean"
+    (parse ''{"name":"m","type":"core","platform":"true"}'').platform)
+
+  # `platform` (singular) at the TOP LEVEL is a real field now, so the
+  # near-miss sweep in resolvePlatforms must not read it as a misspelling of
+  # `platforms`. This is the assertion that keeps that carve-out honest: the
+  # same key one level down is still swept.
+  (assertBool "top-level platform survives the `platforms` near-miss sweep"
+    (parse ''{"name":"m","type":"core","platform":true,"dependencies":[]}'').platform
+    true)
+
+  (assertThrows "a nested `platform` key is still a near-miss for `platforms`"
+    (parse ''{"name":"m","type":"core","nix":{"platform":[]}}'').name)
+
+  # ...and it may not be platform-keyed. A module whose platform access depends
+  # on the target is two modules, and `topAllowed` refuses the overlay by name.
+  (assertThrows "platform cannot be varied by a platforms overlay"
+    (parse ''{"name":"m","type":"core","platforms":[{"when":{"os":"linux"},
+       "platform":true}]}'').platform)
+
+  # DECLARING PLATFORM ACCESS AND ASKING FOR A `web` VARIANT IN ONE FILE.
+  # mkLogosModule makes the output absent rather than throwing, because a
+  # consumer's `or null` cannot catch a throw -- but an author who WROTE a `web`
+  # block gets told, here, where the contradiction is.
+  (assertThrows "platform: true with web.dependencies is refused"
+    (parse ''{"name":"m","type":"core","platform":true,"web":{"dependencies":["x"]}}'')
+      .web_dependencies)
+
+  (assertThrows "platform: true with web.view_backend is refused"
+    (parse ''{"name":"m","type":"ui_qml","view":"q/M.qml","platform":true,
+       "web":{"view_backend":{"class":"B","header":"src/B.h"}}}'').web_view_backend)
+
+  # ...and a Platform module that asks for NOTHING still parses: `platform:
+  # true` on its own is the normal case and must not drag the `web` keys into
+  # existence.
+  (assertEq "platform: true alone leaves web_dependencies as `dependencies`"
+    (parse ''{"name":"m","type":"core","platform":true,"dependencies":["a"]}'')
+      .web_dependencies
+    [ "a" ])
 ]

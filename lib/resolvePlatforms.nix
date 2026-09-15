@@ -503,6 +503,19 @@ let
   # ignored in silence.
   platformsNearMisses = [ "platform" "Platforms" "platform_overrides" "platform_overlays" ];
 
+  # ...with ONE exception, and it is a real field rather than a carve-out for a
+  # typo: ADR 0009 gave the TOP LEVEL a boolean `platform`, which declares that
+  # the module owns access a webview cannot provide and therefore gets no `web`
+  # variant. It is deliberately NOT overlay-keyable — a module whose platform
+  # access depends on the target is two modules — so it is absent from
+  # `topAllowed`, and an author who writes `"platforms"` around it is still
+  # refused by that list.
+  #
+  # Only at the top level. `nix.platform`, `codegen.platform` and every other
+  # depth stay near-misses, because nothing reads them and the original
+  # silently-ignored-overlay defect is exactly what they would be.
+  legalPlatformBoolPaths = [ "platform" ];
+
   sweepMisplacedPlatforms = raw:
     let
       walk = path: v:
@@ -515,7 +528,8 @@ let
             # defect wearing a typo. No metadata.json in the tree carries any
             # `platform*` key, so refusing them costs nothing today.
             if (k == "platforms" && !(builtins.elem here legalPlatformsPaths))
-               || builtins.elem k platformsNearMisses
+               || (builtins.elem k platformsNearMisses
+                   && !(builtins.elem here legalPlatformBoolPaths))
             then [ here ]
             else walk here v.${k}
           ) (builtins.attrNames v)
