@@ -1,0 +1,18 @@
+; The dependency's contract, COMMITTED rather than pinned as a flake input.
+;
+; There is no `stub_target` module anywhere in this tree and there must not be:
+; what the outbound door has to be tested against is a target that ANSWERS, and
+; the node harness in tests/test-web-variant.nix is that target. A real module
+; here would drag a second build into a test about a message on a wire.
+;
+; `dependency_overrides` in metadata.json is the supported way to say so — it is
+; the documented escape hatch for depending on something that publishes no
+; contract of its own.
+module stub_target {
+  version "1.0.0"
+  description "A target that exists only as a contract; the test harness answers for it."
+  category "testing"
+  depends []
+
+  method increment(amount: int) -> int
+}

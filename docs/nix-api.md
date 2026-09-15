@@ -444,7 +444,7 @@ makes the output *absent* rather than an attribute that throws, so a consumer's
 | Gate | Written where | Lifts when |
 |---|---|---|
 | `platform: true` — the module owns access a webview cannot provide | the module's `metadata.json` | never; it is architectural |
-| the module has `dependencies` and the pinned `logos-protocol` wasm subset cannot make an outbound call | the *pin*, as `logos-protocol-wasm`'s `hasOutboundDoor` passthru | the day the protocol ships a client side — with no edit in any module's flake |
+| the module has `dependencies` and the pinned `logos-protocol` wasm subset cannot make an outbound call | the *pin*, as `logos-protocol-wasm`'s `hasOutboundDoor` passthru | when the protocol pin carries the outbound door — with no edit in any module's flake |
 
 The second is keyed on the pin and not on `dependencies != []`, because having
 dependencies is exactly what a Downloaded module built on top of a Platform
@@ -452,6 +452,31 @@ module does: a rule keyed on the module would have to be un-written the day the
 door lands, and the modules it wrongly refused would stay refused until someone
 remembered to. A module that writes `"web": { "dependencies": [] }` says its
 image is a leaf and calls nobody, and builds today.
+
+### Calling a dependency from a `web` image
+
+A protocol pin with `hasOutboundDoor = true` defines `lp_client_create`,
+`lp_client_destroy` and `lp_invoke_async` for wasm32, over the same channel the
+Wasm host already serves on. A module's generated dependency clients use it with
+no change on the author's part — **except one**:
+
+> **Async only.** `lp_invoke`, the synchronous twin, is deliberately *undefined*
+> on wasm32. A Web Worker is one event loop and the image carries no ASYNCIFY
+> (ADR 0004), so a call that blocked waiting for its reply would deadlock the
+> loop that delivers it.
+
+What that means per language:
+
+| authoring | calling `dep.thing(...)` in a `web` build |
+|---|---|
+| `codegen.rust` | **does not compile.** `logos-rust-sdk` gates every synchronous call path on `cfg(not(target_os = "emscripten"))` and `lidl-gen` emits the sync methods under the same gate, so the error names your method. Call `thing_async(..., callback)`. |
+| universal C++ | **does not link.** `wasm-ld` reports `undefined symbol: lp_invoke`. Call `thingAsync(..., callback)`. |
+
+The door presents the credential the image holds for the target, and asks
+`capability_module.requestModule` for one the first time it has none — the same
+handshake a native client runs transparently. A target it is granted no token
+for is **refused, not forwarded**: the call fails through the callback and no
+frame reaches the container.
 
 The container is unchanged and is not wasm-aware. It opens `main` in a webview
 and relays the web transport across its bridge; the page relays that to the

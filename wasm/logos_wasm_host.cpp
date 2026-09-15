@@ -22,10 +22,21 @@
 //                                                              THIS IMAGE
 //
 // WHAT IT IS NOT. It is not a Logos CORE: it publishes no registry, resolves no
-// name but its own, and holds no other module's credentials. And it makes no
-// outbound calls — a wasm module with dependencies is a later slice, and it will
-// arrive as a second door over the same channel rather than by linking a
-// consumer stack in here (see implementations/wasm/wasm_lp_abi.cpp).
+// name but its own, and holds no other module's credentials.
+//
+// IT DOES MAKE OUTBOUND CALLS NOW, over this same channel and through a door
+// this file does not implement. logos-protocol's wasm subset owns
+// lp_client_create / lp_client_destroy / lp_invoke_async (see
+// implementations/wasm/wasm_lp_abi.cpp), which is what a module's generated
+// dependency clients call; all this file contributes is the connection, handed
+// over once in main() through wasm_outbound_door.h. That split is deliberate —
+// the door is the protocol's C ABI and belongs with the rest of it, and the
+// channel is the host's and belongs here.
+//
+// SYNCHRONOUS OUTBOUND CALLS DO NOT EXIST, and the note below on the event loop
+// is the reason: a call that blocked for its reply would block the loop that
+// delivers it. lp_invoke is undefined on purpose, so a module that calls a
+// synchronous dependency wrapper fails to build rather than hanging on a phone.
 //
 // SINGLE-THREADED, BY CONSTRUCTION. No pthreads, no ASYNCIFY: a Worker is one
 // event loop, dispatch runs on it, and every reply this file produces is
@@ -38,6 +49,7 @@
 #include "json_mapping.h"
 #include "message_channel.h"
 #include "rpc_message.h"
+#include "wasm_outbound_door.h"
 #include "web_rpc_connection.h"
 
 #include <emscripten.h>
@@ -500,6 +512,20 @@ int main()
     g_channel = std::make_shared<WorkerPortChannel>();
     g_connection = std::make_shared<logos::web::WebRpcConnection>(g_channel, &provider);
     g_connection->start();
+
+    // ── THE OUTBOUND DOOR GETS THE SAME CONNECTION ────────────────────────
+    //
+    // One channel, both directions. lp_invoke_async lives in logos-protocol's
+    // wasm subset and has no way to reach this object on its own; this is the
+    // whole of the seam (wasm_outbound_door.h).
+    //
+    // AFTER start(), and that ordering matters: a module's on_context_ready
+    // runs on the first dispatch, which cannot happen before the connection is
+    // serving, so by the time anything in the image can call out the door is
+    // already open. Installing it before start() would only widen the window in
+    // which a call could be handed a connection that is not listening for its
+    // reply.
+    logos::wasm::setOutboundConnection(g_connection);
 
     g_readyMs = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - started).count();

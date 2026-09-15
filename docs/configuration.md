@@ -281,6 +281,11 @@ instead of failing to evaluate.
 > gets a `web` variant only once the pinned `logos-protocol` wasm subset can
 > make an outbound call (its `hasOutboundDoor` passthru). That one heals on a
 > pin bump with no edit in any module's flake.
+>
+> Once it has: a `web` image calls its dependencies through the **async**
+> generated methods only (`thing_async` / `thingAsync`). The synchronous twin
+> is absent on wasm32 by design — see "Calling a dependency from a `web` image"
+> in `docs/nix-api.md`.
 
 ### `web.view_backend`
 **Type:** object
