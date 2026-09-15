@@ -64,10 +64,17 @@
   hasOutboundDoor ? false }:
 
 let
-  counter = mkLogosModule {
-    src = fixturesRoot + "/bare-counter";
-    configFile = fixturesRoot + "/bare-counter/metadata.json";
+  # Sources and metadata are named separately because ONE fixture pair below
+  # deliberately mixes them (`bare-counter-platform` is a metadata file over
+  # bare-counter's sources); everywhere else the two are the same directory,
+  # which is what `moduleFixture` says.
+  moduleAt = srcFixture: configFixture: mkLogosModule {
+    src = fixturesRoot + "/${srcFixture}";
+    configFile = fixturesRoot + "/${configFixture}/metadata.json";
   };
+  moduleFixture = fixture: moduleAt fixture fixture;
+
+  counter = moduleFixture "bare-counter";
 
   system = pkgs.stdenv.hostPlatform.system;
   counterWeb = counter.packages.${system}.web;
@@ -93,12 +100,8 @@ let
                          + "the variant reachable")
     else true;
 
-  moduleAt = fixture: configFixture: mkLogosModule {
-    src = fixturesRoot + "/${fixture}";
-    configFile = fixturesRoot + "/${configFixture}/metadata.json";
-  };
-
-  noWeb = label: fixture: noWebFor "${label} (${fixture})" (moduleAt fixture fixture);
+  noWeb = label: fixture:
+    noWebFor "${label} (${fixture})" (moduleFixture fixture);
 
   qtPluginsHaveNoWeb =
     noWeb "a hand-written Qt core module" "test-framework-module"
@@ -135,14 +138,11 @@ let
   # side, `hasOutboundDoor` is true, the output comes back, and this assertion
   # follows it rather than having to be deleted. test-bare-modules.nix pins the
   # other half -- that the Bare artifact leaves lp_invoke undefined on purpose.
-  relay = moduleAt "bare-relay" "bare-relay";
+  relay = moduleFixture "bare-relay";
   relayWebMatchesThePin =
-    let
-      hasDoor = hasOutboundDoor;
-      hasWeb = relay.packages.${system} ? web;
-    in
-    if hasDoor == hasWeb then true
-    else if hasDoor
+    let hasWeb = relay.packages.${system} ? web; in
+    if hasOutboundDoor == hasWeb then true
+    else if hasOutboundDoor
     then builtins.throw ("FAIL: the pinned logos-protocol declares an outbound "
                          + "door, so a module with dependencies must get a `web` "
                          + "output again -- bare_relay has none")
@@ -151,11 +151,13 @@ let
                          + "bare_counter) must have no `web` output; it has one, "
                          + "and it can only fail at wasm-ld");
 
-in assert qtPluginsHaveNoWeb;
-   assert platformModuleHasNoWeb;
-   assert platformModuleKeepsBare;
-   assert relayWebMatchesThePin;
-   pkgs.runCommand "web-variant-tests" {
+in
+assert qtPluginsHaveNoWeb;
+assert platformModuleHasNoWeb;
+assert platformModuleKeepsBare;
+assert relayWebMatchesThePin;
+
+pkgs.runCommand "web-variant-tests" {
   nativeBuildInputs = [ pkgs.nodejs ];
 } ''
   set -euo pipefail

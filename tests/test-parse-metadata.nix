@@ -1149,7 +1149,8 @@ in [
     (parse ''{"name":"m","type":"core","nix":{"platform":[]}}'').name)
 
   # ...and it may not be platform-keyed. A module whose platform access depends
-  # on the target is two modules, and `topAllowed` refuses the overlay by name.
+  # on the target is two modules, so the near-miss sweep in resolvePlatforms
+  # refuses `platforms[0].platform` by path before `topAllowed` is consulted.
   (assertThrows "platform cannot be varied by a platforms overlay"
     (parse ''{"name":"m","type":"core","platforms":[{"when":{"os":"linux"},
        "platform":true}]}'').platform)

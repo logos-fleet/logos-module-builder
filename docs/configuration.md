@@ -863,6 +863,11 @@ Anything else is refused, and the refusals are deliberate:
   tells you nothing about the other.
 * `concurrency` — the author owns thread safety for `"multi"`; correctness must
   not depend on which host produced the binary.
+* `platform` decides whether the module has a `web` variant **at all**, and a
+  module whose platform access depends on the target is two modules. Note the
+  singular: `platform` at the top level is that boolean, while `platforms` is
+  the overlay list — writing `platform` *inside* an overlay body is a hard error
+  naming the path.
 * `icon`, `view`, `category`, `description` are pure manifest fields resolved on
   the installing machine.
 
