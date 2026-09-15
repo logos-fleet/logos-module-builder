@@ -68,9 +68,9 @@
 { pkgs, mkLogosModule, fixturesRoot
 , # Does the pinned logos-protocol's wasm subset define lp_client_create /
   # lp_client_destroy / lp_invoke_async? Passed in rather than read here,
-  # because this file is handed
-  # `pkgs` and not the protocol flake -- and because the assertion below is
-  # "the `web` output follows the pin", which needs the pin as an input.
+  # because this file is handed `pkgs` and not the protocol flake -- and
+  # because the assertion below is "the `web` output follows the pin", which
+  # needs the pin as an input.
   hasOutboundDoor ? false }:
 
 let
@@ -182,7 +182,14 @@ let
   # .lidl): the target is the node harness below, which is what makes this a
   # test about a frame on a wire rather than about a second module's build.
   webRustCaller = moduleFixture "web-rust-caller";
-  webRustCallerWeb = webRustCaller.packages.${system}.web;
+  # Named like the assertion above rather than reached for directly: without the
+  # door the attribute is ABSENT, and `attribute 'web' missing` three hundred
+  # lines from here says nothing about why.
+  webRustCallerWeb =
+    if hasOutboundDoor then webRustCaller.packages.${system}.web
+    else builtins.throw ("FAIL: the pinned logos-protocol wasm subset cannot "
+                         + "make an outbound call, so web_rust_caller (which "
+                         + "calls stub_target) has no `web` output to drive");
 
 in
 assert qtPluginsHaveNoWeb;

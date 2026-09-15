@@ -42,6 +42,9 @@ struct WebRustCallerImpl;
 
 impl WebRustCallerModule for WebRustCallerImpl {
     fn kick(&mut self, amount: i64) -> String {
+        // The scope is load-bearing: the door may answer INLINE (a refusal it
+        // decides without the wire), so the lock has to be gone before the
+        // call goes out or the callback would deadlock on it.
         {
             let mut slot = LAST.lock().unwrap();
             slot.clear();
