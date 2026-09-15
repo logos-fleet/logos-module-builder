@@ -503,6 +503,21 @@ let
   # ignored in silence.
   platformsNearMisses = [ "platform" "Platforms" "platform_overrides" "platform_overlays" ];
 
+  # ...with ONE exception, and it is a real field rather than a carve-out for a
+  # typo: ADR 0009 gave the TOP LEVEL a boolean `platform`, which declares that
+  # the module owns access a webview cannot provide and therefore gets no `web`
+  # variant.
+  #
+  # Only at the top level. `nix.platform`, `codegen.platform` and every other
+  # depth stay near-misses, because nothing reads them and the original
+  # silently-ignored-overlay defect is exactly what they would be. That includes
+  # `platforms[*].platform`: the flag is deliberately NOT overlay-keyable — a
+  # module whose platform access depends on the target is two modules — and an
+  # author who writes it inside an overlay body is refused HERE, by this sweep,
+  # before `topAllowed` is ever consulted. See `fixHint` for why that path needs
+  # its own advice.
+  legalPlatformBoolPaths = [ "platform" ];
+
   sweepMisplacedPlatforms = raw:
     let
       walk = path: v:
@@ -515,7 +530,8 @@ let
             # defect wearing a typo. No metadata.json in the tree carries any
             # `platform*` key, so refusing them costs nothing today.
             if (k == "platforms" && !(builtins.elem here legalPlatformsPaths))
-               || builtins.elem k platformsNearMisses
+               || (builtins.elem k platformsNearMisses
+                   && !(builtins.elem here legalPlatformBoolPaths))
             then [ here ]
             else walk here v.${k}
           ) (builtins.attrNames v)
@@ -527,16 +543,33 @@ let
       # where it stands, the other is moved. Telling an author to "move the list
       # up" when they wrote `platform` sends them off to rewrite a structure
       # that was already correct.
-      misspelled = lib.filter (o: builtins.elem (lib.last (lib.splitString "." o))
-                                                platformsNearMisses) offenders;
+      #
+      # ...and since ADR 0009, `platform` (singular) is ALSO a real field, so an
+      # offender spelled exactly that is AMBIGUOUS: either the overlay list
+      # misspelled, or the boolean written where nothing reads it — which is
+      # what `platforms[0].platform` is, and telling that author to "rename it
+      # to `platforms`" would walk them into a second error. Say both readings
+      # rather than guessing.
+      lastSegment = o: lib.last (lib.splitString "." o);
+      misspelled = lib.filter (o: builtins.elem (lastSegment o) platformsNearMisses)
+                              offenders;
+      allMisspelled = misspelled != [ ] && misspelled == offenders;
+      anyPlatformFlagSpelling = lib.any (o: lastSegment o == "platform") offenders;
       fixHint =
-        if misspelled != [ ] && misspelled == offenders then
-          "Rename it to `platforms` (plural) where it stands."
-        else
+        if !allMisspelled then
           "Move the list up to whichever of those owns the key you meant to vary, "
           + "and name the key inside the overlay body: "
           + "`\"nix\": { \"platforms\": [ { \"when\": {...}, \"packages\": {...} } ] }`, "
-          + "not `\"nix\": { \"packages\": { \"platforms\": [...] } }`.";
+          + "not `\"nix\": { \"packages\": { \"platforms\": [...] } }`."
+        else if anyPlatformFlagSpelling then
+          "`platform` (singular) is ALSO a real key — the TOP-LEVEL boolean that "
+          + "declares the module owns access a webview cannot provide (ADR 0009) — "
+          + "and it is deliberately not overlay-keyable, because a module whose "
+          + "platform access depends on the target is two modules. Move it to the "
+          + "top level if that is what you meant, or rename it to `platforms` "
+          + "(plural) where it stands if you meant an overlay."
+        else
+          "Rename it to `platforms` (plural) where it stands.";
     in
       if offenders == [ ] then null
       else throw ("metadata.json: `" + builtins.concatStringsSep "`, `" offenders

@@ -1,0 +1,27 @@
+{
+  "name": "bare_counter",
+  "version": "1.0.0",
+  "description": "Fixture: bare_counter's metadata with `platform: true`. Paired with the bare-counter SOURCES, so the only difference from the fixture above is the declaration itself.",
+  "author": "Logos Core Team",
+  "type": "core",
+  "interface": "universal",
+  "platform": true,
+  "category": "testing",
+  "main": "bare_counter_plugin",
+  "dependencies": [],
+  "include": [],
+  "capabilities": [],
+  "nix": {
+    "external_libraries": [],
+    "packages": {
+      "build": [],
+      "runtime": [
+        "nlohmann_json"
+      ]
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": []
+    }
+  }
+}

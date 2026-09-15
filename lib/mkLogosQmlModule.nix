@@ -354,6 +354,14 @@ let
   # pinned logos-protocol publishes the web transport behind it. Any missing
   # means no `web` output on this module, which is what a pin rollout looks like
   # from here.
+  #
+  # AND `platform: true` (ADR 0009) needs no seventh entry, which is worth
+  # stating so that a reader looking for the ADR's gate on this path finds why
+  # there is nothing to find. A `web` view is built only from a DECLARED
+  # `web.view_backend`, and parseMetadata refuses that declaration next to
+  # `platform: true` by name, at eval, where the contradiction is written. A
+  # Platform view module that declares no backend already falls out of the list
+  # below with `cfg.web_view_backend == null`.
   webViewFor = system:
     let
       pkgs = pkgsFor system;

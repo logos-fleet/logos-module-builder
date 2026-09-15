@@ -534,6 +534,13 @@
             inherit pkgs;
             mkLogosModule = lib.mkLogosModule;
             fixturesRoot = ./tests/fixtures;
+            # ADR 0009 gate 2 is a property of the PIN, so the test is handed the
+            # pin's answer and asserts that the `web` output tracks it in both
+            # directions. `or false` for the same reason mkLogosModule uses it: a
+            # protocol that predates the passthru is a protocol without the door.
+            hasOutboundDoor =
+              (logos-protocol.packages.${system}.logos-protocol-wasm).hasOutboundDoor
+                or false;
           }
           else pkgs.runCommand "web-variant-tests-skipped" { } ''
             echo "SKIP: web-variant — the pinned logos-protocol publishes no"
