@@ -56,9 +56,19 @@
 #     `web` output at all, and a module with dependencies gets one only when the
 #     PINNED protocol can make an outbound call. Both are pure evaluation and
 #     both are differential against the counter this file realises below.
+#   * THE OUTBOUND DOOR, driven. A `codegen.rust` module with a dependency
+#     compiles, links, and CALLS that dependency out of the image: the harness
+#     below is the target, it mints the credential the door asks
+#     capability_module for, it sees its own token on the frame that follows,
+#     and it answers. Then the mirror: a capability_module that grants nothing
+#     leaves the target undialled, because a door that forwarded a call it was
+#     not granted would be a hole. That is what could not be done at all before
+#     lp_client_create / lp_invoke_async existed on wasm32, and the one part of
+#     it a link cannot establish.
 { pkgs, mkLogosModule, fixturesRoot
 , # Does the pinned logos-protocol's wasm subset define lp_client_create /
-  # lp_invoke? Passed in rather than read here, because this file is handed
+  # lp_client_destroy / lp_invoke_async? Passed in rather than read here,
+  # because this file is handed
   # `pkgs` and not the protocol flake -- and because the assertion below is
   # "the `web` output follows the pin", which needs the pin as an input.
   hasOutboundDoor ? false }:
@@ -128,10 +138,19 @@ let
 
   # ── ADR 0009 GATE 2: dependencies, against the pinned protocol ───────────
   #
-  # `bare_relay` calls `bare_counter` through modules(), so its image needs
-  # `lp_invoke` -- which the wasm subset does not define (logos-protocol
-  # nix/wasm.nix, `hasOutboundDoor`). Before this gate the module published a
+  # `bare_relay` calls `bare_counter` through modules(), so its image needs the
+  # outbound door -- which the wasm subset publishes as `hasOutboundDoor`
+  # (logos-protocol nix/wasm.nix). Before this gate the module published a
   # `web` output that could only ever fail at wasm-ld.
+  #
+  # ONE THING THIS DOES NOT CLAIM, and it is worth saying where the fixture is:
+  # that bare_relay's `web` output BUILDS. It is a universal C++ module calling
+  # the SYNCHRONOUS generated wrapper, and the sync door is deliberately absent
+  # on wasm32 (a Worker is one event loop; ADR 0004), so its image fails at
+  # wasm-ld naming `lp_invoke` -- which IS the designed diagnosis for a module
+  # that has not switched spellings. The gate is about whether the protocol pin
+  # CAN carry an outbound call; `web-rust-caller` below is the fixture that
+  # proves one, through the async twin a `web` variant is meant to use.
   #
   # Asserted as a FUNCTION OF THE PIN and not as a flat "modules with
   # dependencies have no web output": the day logos-protocol ships the client
@@ -150,6 +169,20 @@ let
                          + "an outbound call, so bare_relay (which calls "
                          + "bare_counter) must have no `web` output; it has one, "
                          + "and it can only fail at wasm-ld");
+
+  # ── THE OUTBOUND DOOR'S FIXTURE ──────────────────────────────────────────
+  #
+  # A `codegen.rust` module whose ONLY interesting property is that it calls its
+  # dependency. Rust rather than C++ because the generated async client is the
+  # surface a `web` variant is meant to use and the one the sync gate leaves
+  # standing -- if logos-rust-sdk's `cfg(not(target_os = "emscripten"))` had
+  # taken the async twin with the sync one, this fixture would not compile.
+  #
+  # Its dependency is a CONTRACT ONLY (`dependency_overrides` at a committed
+  # .lidl): the target is the node harness below, which is what makes this a
+  # test about a frame on a wire rather than about a second module's build.
+  webRustCaller = moduleFixture "web-rust-caller";
+  webRustCallerWeb = webRustCaller.packages.${system}.web;
 
 in
 assert qtPluginsHaveNoWeb;
@@ -622,6 +655,162 @@ pkgs.runCommand "web-variant-tests" {
   grep -q 'worker.onerror' "$variant/index.html" \
     || { echo "FAIL: the loader page has no backstop for a trap outside a frame"; exit 1; }
   echo "PASS: the loader page reports a dead image by closing its channel"
+
+  # ── THE OUTBOUND DOOR, DRIVEN ─────────────────────────────────────────────
+  #
+  # Everything above is a call going INTO an image. This is one coming out, and
+  # it is the half that did not exist: lp_client_create / lp_invoke_async on
+  # wasm32, over the same connection the host installed
+  # (logos::wasm::setOutboundConnection in wasm/logos_wasm_host.cpp).
+  #
+  # THE HARNESS IS THE FAR SIDE OF THE CHANNEL, which is what makes this
+  # checkable without a browser, a container or a second module: the image's one
+  # message port is `Module.logosOut` here, so a frame the image SENDS is an
+  # entry in the transcript, and a reply is a `logos_wasm_deliver` away. The
+  # target module `stub_target` exists only as a .lidl; node answers for it.
+  #
+  # WHY capability_module APPEARS. The image holds no credential for its
+  # dependency at startup -- the core pushes a module its OWN token and its
+  # callers', never an outbound one -- so the door runs the same requestModule
+  # handshake a native client runs transparently on its first call. Both
+  # outcomes are driven below, because the refusal is the security-relevant one.
+  caller=${webRustCallerWeb}/web_rust_caller_web
+  test -d "$caller" || { echo "FAIL: the rust caller has no web variant"; exit 1; }
+  cp "$caller/web_rust_caller_wasm.js" ./caller-host.js
+  cat > drive-outbound.js <<'JS'
+  const factory = require('./caller-host.js');
+  const CALL = 1, RESULT = 2;
+
+  const fail = (why, transcript) => {
+    console.error('FAIL: ' + why);
+    if (transcript) console.error(JSON.stringify(transcript, null, 2));
+    process.exit(1);
+  };
+
+  async function spawn() {
+    const heard = [];
+    const mod = await factory({
+      logosOut: (text) => {
+        let msg;
+        try { msg = JSON.parse(text); } catch (e) { return; }
+        if (msg.logosWasmHost) return;
+        heard.push(msg);
+      },
+      print: () => {}, printErr: () => {},
+    });
+    const deliver = mod.cwrap('logos_wasm_deliver', null, ['string']);
+    return {
+      heard,
+      send: (type, payload) => deliver(JSON.stringify({ type, payload })),
+      result: (id) => heard.find((m) => m.type === RESULT && m.payload.id === id),
+      // Frames the IMAGE sent, i.e. its outbound calls.
+      outbound: () => heard.filter((m) => m.type === CALL),
+    };
+  }
+
+  (async () => {
+    // ── the granted path ────────────────────────────────────────────────────
+    const a = await spawn();
+    a.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller',
+                   method: 'kick', args: [5] });
+
+    const dispatched = a.result(1);
+    if (!dispatched || !dispatched.payload.ok || dispatched.payload.value !== 'dispatched') {
+      fail('kick() did not answer -- the module never ran', a.heard);
+    }
+    // ASYNC, AND THE TRANSCRIPT SAYS SO: nothing has answered the outbound call
+    // yet, so the module has no result to report.
+    a.send(CALL, { id: 2, authToken: "", object: 'web_rust_caller', method: 'last', args: [] });
+    const inFlight = a.result(2);
+    // Double quotes for the empty string, throughout: this script lives inside
+    // a nix indented string, where a bare pair of single quotes ENDS it.
+    if (!inFlight || inFlight.payload.value !== "") {
+      fail('last() answered before the dependency did -- the door is not async',
+           a.heard);
+    }
+
+    const handshake = a.outbound()[0];
+    if (!handshake || handshake.payload.object !== 'capability_module'
+        || handshake.payload.method !== 'requestModule') {
+      fail('the image did not ask capability_module for a token', a.heard);
+    }
+    if (handshake.payload.args[1] !== 'stub_target') {
+      fail('the handshake did not name the target: '
+           + JSON.stringify(handshake.payload.args), a.heard);
+    }
+    a.send(RESULT, { id: handshake.payload.id, ok: true, value: 'tok-for-stub' });
+
+    // ...and only NOW is the target dialled, carrying the token it was granted.
+    const call = a.outbound()[1];
+    if (!call || call.payload.object !== 'stub_target' || call.payload.method !== 'increment') {
+      fail('the image did not call its dependency after being granted a token', a.heard);
+    }
+    if (call.payload.args[0] !== 5) {
+      fail('the outbound call lost its argument: ' + JSON.stringify(call.payload.args));
+    }
+    if (call.payload.authToken !== 'tok-for-stub') {
+      fail('the outbound frame carries authToken='
+           + JSON.stringify(call.payload.authToken)
+           + ', not the credential capability_module granted');
+    }
+
+    // The stub answers, and the reply has to reach the module's own callback.
+    a.send(RESULT, { id: call.payload.id, ok: true, value: 15 });
+    a.send(CALL, { id: 3, authToken: "", object: 'web_rust_caller', method: 'last', args: [] });
+    const landed = a.result(3);
+    if (!landed || landed.payload.value !== 'ok:15') {
+      fail('the reply did not land in the callback: '
+           + JSON.stringify(landed && landed.payload), a.heard);
+    }
+    console.log('PASS: a wasm image called its dependency and the reply landed '
+                + 'in the callback, on a token capability_module granted it');
+
+    // ONCE PER TARGET. The grant went into the image's own store, so a second
+    // call does not re-run the handshake.
+    const before = a.outbound().length;
+    a.send(CALL, { id: 4, authToken: "", object: 'web_rust_caller', method: 'kick', args: [7] });
+    const second = a.outbound()[before];
+    if (!second || second.payload.object !== 'stub_target') {
+      fail('the second call did not go straight to the target', a.heard.slice(-4));
+    }
+    if (second.payload.authToken !== 'tok-for-stub') {
+      fail('the remembered token was not presented on the second call');
+    }
+    console.log('PASS: the capability handshake runs once per target, not once per call');
+
+    // ── the refusal ─────────────────────────────────────────────────────────
+    //
+    // A fresh image, because the one above now holds a credential. This is the
+    // property the issue calls the hole: a door that forwarded a call it was
+    // not granted would put an unauthorized frame on the container's wire and
+    // leave the decision to whatever the far side happens to check.
+    const b = await spawn();
+    b.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller',
+                   method: 'kick', args: [5] });
+    const ask = b.outbound()[0];
+    if (!ask || ask.payload.object !== 'capability_module') {
+      fail('the second image did not run the handshake', b.heard);
+    }
+    b.send(RESULT, { id: ask.payload.id, ok: true, value: "" });   // granted nothing
+
+    if (b.outbound().length !== 1) {
+      fail('the target was dialled without a token: '
+           + JSON.stringify(b.outbound().map((m) => m.payload.object)), b.heard);
+    }
+    b.send(CALL, { id: 2, authToken: "", object: 'web_rust_caller', method: 'last', args: [] });
+    const refused = b.result(2);
+    if (!refused || !String(refused.payload.value).startsWith('err:')) {
+      fail('an ungranted call was not reported to the module as a failure: '
+           + JSON.stringify(refused && refused.payload.value), b.heard);
+    }
+    if (!String(refused.payload.value).includes('stub_target')) {
+      fail('the refusal does not name the target: ' + refused.payload.value);
+    }
+    console.log('PASS: a target this image holds no token for is refused, not forwarded');
+  })().catch((e) => { console.error('FAIL: ' + ((e && e.stack) || e)); process.exit(1); });
+  JS
+
+  node drive-outbound.js
 
   mkdir -p $out
   cp "$variant/wasm-host.json" $out/
