@@ -65,6 +65,13 @@
 #     not granted would be a hole. That is what could not be done at all before
 #     lp_client_create / lp_invoke_async existed on wasm32, and the one part of
 #     it a link cannot establish.
+#   * ...FROM `on_context_ready`, WHICH IS THE ORDERING. The hook fires at
+#     module LOAD, inside the host's main(), and the host used to install the
+#     door several lines after the setters that fire it -- so the first call a
+#     module author writes was refused inline, with LP_OK returned and nothing
+#     on the wire (logos-workspace#195). The fixture now calls its dependency
+#     from the hook and the drive asserts the frame BEFORE it has delivered
+#     anything, so an image whose transcript is empty at that point fails here.
 { pkgs, mkLogosModule, fixturesRoot
 , # Does the pinned logos-protocol's wasm subset define lp_client_create /
   # lp_client_destroy / lp_invoke_async? Passed in rather than read here,
@@ -681,6 +688,11 @@ pkgs.runCommand "web-variant-tests" {
   # callers', never an outbound one -- so the door runs the same requestModule
   # handshake a native client runs transparently on its first call. Both
   # outcomes are driven below, because the refusal is the security-relevant one.
+  #
+  # AND WHY IT APPEARS BEFORE ANYTHING IS DELIVERED. The fixture's
+  # `on_context_ready` calls its dependency, so the handshake is already on the
+  # wire when the image finishes instantiating. That is the ordering
+  # logos-workspace#195 fixed, and the drive's first assertion.
   caller=${webRustCallerWeb}/web_rust_caller_web
   test -d "$caller" || { echo "FAIL: the rust caller has no web variant"; exit 1; }
   cp "$caller/web_rust_caller_wasm.js" ./caller-host.js
@@ -716,8 +728,55 @@ pkgs.runCommand "web-variant-tests" {
   }
 
   (async () => {
-    // ── the granted path ────────────────────────────────────────────────────
+    // ── THE HOOK CALLS OUT, AND THE FRAME REACHES THE WIRE ─────────────────
+    //
+    // Nothing has been DELIVERED to this image at this point -- `spawn` only
+    // instantiates it -- so every frame already in the transcript was produced
+    // by `on_context_ready`, on the stack of the host's main(). That is exactly
+    // the window logos-workspace#195 was about: the host used to install the
+    // outbound door several lines AFTER the two setters that fire the hook, so
+    // a call made there found no connection, was refused inline by
+    // lp_invoke_async, still returned LP_OK, and put nothing on the wire. An
+    // empty transcript here is that bug, and it is the first thing asserted
+    // because it is the one a module author meets first.
     const a = await spawn();
+    const boot = a.outbound()[0];
+    if (!boot) {
+      fail('on_context_ready put NOTHING on the wire: the outbound door was not '
+           + 'open when the hook fired', a.heard);
+    }
+    if (boot.payload.object !== 'capability_module'
+        || boot.payload.method !== 'requestModule'
+        || boot.payload.args[1] !== 'stub_target') {
+      fail("the hook's first frame is not the capability handshake for "
+           + 'stub_target: ' + JSON.stringify(boot.payload), a.heard);
+    }
+    a.send(RESULT, { id: boot.payload.id, ok: true, value: 'tok-for-stub' });
+
+    const bootCall = a.outbound()[1];
+    if (!bootCall || bootCall.payload.object !== 'stub_target'
+        || bootCall.payload.method !== 'increment') {
+      fail("the hook's call did not reach its target once the grant landed",
+           a.heard);
+    }
+    // BOOT_AMOUNT in the fixture, chosen so the load-time frame cannot be
+    // mistaken for one `kick` produced.
+    if (bootCall.payload.args[0] !== 41) {
+      fail("the hook's call lost its argument: "
+           + JSON.stringify(bootCall.payload.args));
+    }
+    a.send(RESULT, { id: bootCall.payload.id, ok: true, value: 42 });
+    a.send(CALL, { id: 10, authToken: "", object: 'web_rust_caller',
+                   method: 'boot', args: [] });
+    const booted = a.result(10);
+    if (!booted || booted.payload.value !== 'ok:42') {
+      fail("the hook's reply did not land in its callback: "
+           + JSON.stringify(booted && booted.payload), a.heard);
+    }
+    console.log('PASS: a call made from on_context_ready reaches the wire and '
+                + 'its reply lands in the callback');
+
+    // ── a call from a DISPATCH, on the credential the hook was granted ──────
     a.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller',
                    method: 'kick', args: [5] });
 
@@ -736,21 +795,16 @@ pkgs.runCommand "web-variant-tests" {
            a.heard);
     }
 
-    const handshake = a.outbound()[0];
-    if (!handshake || handshake.payload.object !== 'capability_module'
-        || handshake.payload.method !== 'requestModule') {
-      fail('the image did not ask capability_module for a token', a.heard);
-    }
-    if (handshake.payload.args[1] !== 'stub_target') {
-      fail('the handshake did not name the target: '
-           + JSON.stringify(handshake.payload.args), a.heard);
-    }
-    a.send(RESULT, { id: handshake.payload.id, ok: true, value: 'tok-for-stub' });
-
-    // ...and only NOW is the target dialled, carrying the token it was granted.
-    const call = a.outbound()[1];
+    // ONCE PER TARGET, not once per call: the grant the HOOK was given went
+    // into the image's own store, so this call goes straight to the target.
+    const call = a.outbound()[2];
     if (!call || call.payload.object !== 'stub_target' || call.payload.method !== 'increment') {
-      fail('the image did not call its dependency after being granted a token', a.heard);
+      fail('the dispatched call did not go straight to the dependency', a.heard);
+    }
+    if (a.outbound().length !== 3) {
+      fail('the capability handshake ran again for a target this image already '
+           + 'holds a token for: '
+           + JSON.stringify(a.outbound().map((m) => m.payload.object)), a.heard);
     }
     if (call.payload.args[0] !== 5) {
       fail('the outbound call lost its argument: ' + JSON.stringify(call.payload.args));
@@ -771,19 +825,8 @@ pkgs.runCommand "web-variant-tests" {
     }
     console.log('PASS: a wasm image called its dependency and the reply landed '
                 + 'in the callback, on a token capability_module granted it');
-
-    // ONCE PER TARGET. The grant went into the image's own store, so a second
-    // call does not re-run the handshake.
-    const before = a.outbound().length;
-    a.send(CALL, { id: 4, authToken: "", object: 'web_rust_caller', method: 'kick', args: [7] });
-    const second = a.outbound()[before];
-    if (!second || second.payload.object !== 'stub_target') {
-      fail('the second call did not go straight to the target', a.heard.slice(-4));
-    }
-    if (second.payload.authToken !== 'tok-for-stub') {
-      fail('the remembered token was not presented on the second call');
-    }
-    console.log('PASS: the capability handshake runs once per target, not once per call');
+    console.log('PASS: the capability handshake runs once per target, not once '
+                + 'per call -- and the one the hook ran is the one that counts');
 
     // ── the refusal ─────────────────────────────────────────────────────────
     //
@@ -792,8 +835,6 @@ pkgs.runCommand "web-variant-tests" {
     // not granted would put an unauthorized frame on the container's wire and
     // leave the decision to whatever the far side happens to check.
     const b = await spawn();
-    b.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller',
-                   method: 'kick', args: [5] });
     const ask = b.outbound()[0];
     if (!ask || ask.payload.object !== 'capability_module') {
       fail('the second image did not run the handshake', b.heard);
@@ -804,8 +845,8 @@ pkgs.runCommand "web-variant-tests" {
       fail('the target was dialled without a token: '
            + JSON.stringify(b.outbound().map((m) => m.payload.object)), b.heard);
     }
-    b.send(CALL, { id: 2, authToken: "", object: 'web_rust_caller', method: 'last', args: [] });
-    const refused = b.result(2);
+    b.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller', method: 'boot', args: [] });
+    const refused = b.result(1);
     if (!refused || !String(refused.payload.value).startsWith('err:')) {
       fail('an ungranted call was not reported to the module as a failure: '
            + JSON.stringify(refused && refused.payload.value), b.heard);
@@ -814,6 +855,17 @@ pkgs.runCommand "web-variant-tests" {
       fail('the refusal does not name the target: ' + refused.payload.value);
     }
     console.log('PASS: a target this image holds no token for is refused, not forwarded');
+
+    // A REFUSAL IS NOT REMEMBERED. Nothing went into the store, so the next
+    // call asks again rather than inheriting the first attempt's verdict --
+    // which is what makes a grant that arrives late still usable.
+    b.send(CALL, { id: 2, authToken: "", object: 'web_rust_caller',
+                   method: 'kick', args: [5] });
+    const reask = b.outbound()[1];
+    if (!reask || reask.payload.object !== 'capability_module') {
+      fail('a call after a refused grant did not re-run the handshake', b.heard);
+    }
+    console.log('PASS: a refused grant is not cached -- the next call asks again');
   })().catch((e) => { console.error('FAIL: ' + ((e && e.stack) || e)); process.exit(1); });
   JS
 

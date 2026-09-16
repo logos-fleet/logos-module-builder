@@ -505,27 +505,48 @@ int main()
     // page, which is strictly more than an empty one gave.
     const std::string storageDir = takeJsString(logos_storage_dir_js());
     const std::string storageBackend = takeJsString(logos_storage_backend_js());
-    logos_module_set_context(("/logos/" + kModuleName).c_str(), kModuleName.c_str(),
-                             storageDir.c_str());
-    logos_module_set_emit_callback(&emitTrampoline, &provider);
 
+    // ── THE WIRE IS BUILT BEFORE THE MODULE IS WOKEN ──────────────────────
+    //
+    // One channel, both directions. The connection serves inbound Call /
+    // Methods / Subscribe / Token through `provider`, and lp_invoke_async --
+    // which lives in logos-protocol's wasm subset and has no way to reach this
+    // object on its own -- borrows the same connection for outbound calls. That
+    // hand-over is the whole of the seam (wasm_outbound_door.h).
+    //
+    // ALL OF IT BEFORE THE TWO SETTERS BELOW, AND THAT ORDERING IS THE POINT.
+    // This file used to claim the opposite -- "a module's on_context_ready runs
+    // on the first dispatch, which cannot happen before the connection is
+    // serving" -- which is true of a C++ plugin and FALSE of every generated
+    // Rust core: `install()` fires on_context_ready AT MODULE LOAD, as soon as
+    // the host has delivered both the context and the emit callback. So the
+    // hook ran here, inside main(), with the door still shut: lp_invoke_async
+    // found no connection, called failCall INLINE, returned LP_OK, and put
+    // nothing on the wire. A module that initialises itself by telling its
+    // dependency something -- the first thing an author reaches for -- was
+    // silently a no-op on this target alone (logos-workspace#195).
+    //
+    // NOTHING IS WIDENED BY MOVING IT. The window the old comment guarded was a
+    // reply arriving at a connection that is not listening, and start() is what
+    // installs the receiver, so start() still precedes the door. And nothing
+    // can be DELIVERED between these lines: a Worker is one event loop, main()
+    // runs to completion on it, and logos_wasm_deliver is only ever called from
+    // a later message event. What the image gains in between is the ability to
+    // TALK, which is exactly what the hook needs.
     g_channel = std::make_shared<WorkerPortChannel>();
     g_connection = std::make_shared<logos::web::WebRpcConnection>(g_channel, &provider);
     g_connection->start();
-
-    // ── THE OUTBOUND DOOR GETS THE SAME CONNECTION ────────────────────────
-    //
-    // One channel, both directions. lp_invoke_async lives in logos-protocol's
-    // wasm subset and has no way to reach this object on its own; this is the
-    // whole of the seam (wasm_outbound_door.h).
-    //
-    // AFTER start(), and that ordering matters: a module's on_context_ready
-    // runs on the first dispatch, which cannot happen before the connection is
-    // serving, so by the time anything in the image can call out the door is
-    // already open. Installing it before start() would only widen the window in
-    // which a call could be handed a connection that is not listening for its
-    // reply.
     logos::wasm::setOutboundConnection(g_connection);
+
+    // ── ...AND ONLY NOW THE MODULE ────────────────────────────────────────
+    //
+    // The second of these two fires the module's load hook (the generated
+    // `install`: "as soon as the host has delivered both the context and the
+    // event plumbing"). Everything that hook may reach -- its persistence path,
+    // its event sink, its dependencies -- is in place above it.
+    logos_module_set_context(("/logos/" + kModuleName).c_str(), kModuleName.c_str(),
+                             storageDir.c_str());
+    logos_module_set_emit_callback(&emitTrampoline, &provider);
 
     g_readyMs = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - started).count();
