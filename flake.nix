@@ -156,9 +156,18 @@
     # Rev-pinned for the same reason logos-plugin-qt is: `nix flake update` must
     # not be able to walk this back to a commit without
     # packages.<sys>.logos-view-templates, which `view-interface-abi` and every
-    # ui_qml plugin build need. UNPINNED: 1f95a75 (the #2 merge that moved the
-    # templates in) IS this repo's master tip, so the pin was already a no-op.
-    logos-view-module.url = "github:logos-co/logos-view-module";
+    # ui_qml plugin build need.
+    #
+    # LOCKED TO THE logos-fleet FORK, and rev-pinned. The fix for the emitter's
+    # member order -- the LogosModules aggregate has to be declared before the
+    # backend so it is destroyed after it, or a backend destructor calling
+    # modules() reads freed memory with no diagnostic -- lives on the fork
+    # (logos-fleet/logos-workspace#224) and is not upstream yet. `nix flake
+    # update` would walk this back to logos-co and silently restore the hazard,
+    # so the rev is written down. Move it back to
+    # `github:logos-co/logos-view-module` once the fork's change has landed
+    # upstream.
+    logos-view-module.url = "github:logos-fleet/logos-view-module/a1e8a805f2f39a3fb1d2b3d16ea705df90235709";
     logos-view-module.inputs.logos-nix.follows = "logos-nix";
     # Unpinned: logos-standalone-app#37 merged (master 13b81c9), so the host shell
     # for ui_qml `nix run` / integration tests carries the qt-host repoint, the
