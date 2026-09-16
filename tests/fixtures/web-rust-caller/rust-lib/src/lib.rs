@@ -48,6 +48,23 @@ static BOOT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 /// driven with, so a harness can tell the two frames apart by their payload.
 const BOOT_AMOUNT: i64 = 41;
 
+/// Park an outbound call's verdict where the reporting method can read it:
+/// `ok:<value>` or `err:<message>`.
+///
+/// One spelling for both callers, so a transcript reads the same whichever of
+/// them produced it. The slot is taken by reference rather than captured
+/// because the door's callback is `FnOnce + Send + 'static`, which the statics
+/// are and a field on the impl is not.
+fn record_outcome<T: std::fmt::Display, E: std::fmt::Display>(
+    slot: &'static std::sync::Mutex<String>,
+    result: std::result::Result<T, E>,
+) {
+    *slot.lock().unwrap() = match result {
+        Ok(v) => format!("ok:{}", v),
+        Err(e) => format!("err:{}", e),
+    };
+}
+
 pub trait WebRustCallerModule: Send + 'static {
     /// Fire `stub_target.increment(amount)` and return at once. The answer
     /// arrives later, in `last()`.
@@ -76,13 +93,7 @@ impl WebRustCallerModule for WebRustCallerImpl {
             let mut slot = LAST.lock().unwrap();
             slot.clear();
         }
-        modules().stub_target.increment_async(amount, |result| {
-            let mut slot = LAST.lock().unwrap();
-            *slot = match result {
-                Ok(v) => format!("ok:{}", v),
-                Err(e) => format!("err:{}", e),
-            };
-        });
+        modules().stub_target.increment_async(amount, |result| record_outcome(&LAST, result));
         "dispatched".to_string()
     }
 
@@ -98,13 +109,7 @@ impl WebRustCallerModule for WebRustCallerImpl {
     /// target: a module author writes this once and it has to behave the same
     /// on a desktop host and inside a Worker.
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {
-        modules().stub_target.increment_async(BOOT_AMOUNT, |result| {
-            let mut slot = BOOT.lock().unwrap();
-            *slot = match result {
-                Ok(v) => format!("ok:{}", v),
-                Err(e) => format!("err:{}", e),
-            };
-        });
+        modules().stub_target.increment_async(BOOT_AMOUNT, |result| record_outcome(&BOOT, result));
     }
 }
 

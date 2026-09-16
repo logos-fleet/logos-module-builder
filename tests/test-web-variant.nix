@@ -699,6 +699,9 @@ pkgs.runCommand "web-variant-tests" {
   cat > drive-outbound.js <<'JS'
   const factory = require('./caller-host.js');
   const CALL = 1, RESULT = 2;
+  // BOOT_AMOUNT in the fixture, and KICK_AMOUNT is anything else: the two
+  // amounts are what tells a load-time frame from a dispatched one.
+  const BOOT_AMOUNT = 41, KICK_AMOUNT = 5;
 
   const fail = (why, transcript) => {
     console.error('FAIL: ' + why);
@@ -759,9 +762,7 @@ pkgs.runCommand "web-variant-tests" {
       fail("the hook's call did not reach its target once the grant landed",
            a.heard);
     }
-    // BOOT_AMOUNT in the fixture, chosen so the load-time frame cannot be
-    // mistaken for one `kick` produced.
-    if (bootCall.payload.args[0] !== 41) {
+    if (bootCall.payload.args[0] !== BOOT_AMOUNT) {
       fail("the hook's call lost its argument: "
            + JSON.stringify(bootCall.payload.args));
     }
@@ -778,7 +779,7 @@ pkgs.runCommand "web-variant-tests" {
 
     // ── a call from a DISPATCH, on the credential the hook was granted ──────
     a.send(CALL, { id: 1, authToken: "", object: 'web_rust_caller',
-                   method: 'kick', args: [5] });
+                   method: 'kick', args: [KICK_AMOUNT] });
 
     const dispatched = a.result(1);
     if (!dispatched || !dispatched.payload.ok || dispatched.payload.value !== 'dispatched') {
@@ -806,7 +807,7 @@ pkgs.runCommand "web-variant-tests" {
            + 'holds a token for: '
            + JSON.stringify(a.outbound().map((m) => m.payload.object)), a.heard);
     }
-    if (call.payload.args[0] !== 5) {
+    if (call.payload.args[0] !== KICK_AMOUNT) {
       fail('the outbound call lost its argument: ' + JSON.stringify(call.payload.args));
     }
     if (call.payload.authToken !== 'tok-for-stub') {
@@ -814,6 +815,8 @@ pkgs.runCommand "web-variant-tests" {
            + JSON.stringify(call.payload.authToken)
            + ', not the credential capability_module granted');
     }
+    console.log('PASS: the capability handshake runs once per target, not once '
+                + 'per call -- and the one the hook ran is the one that counts');
 
     // The stub answers, and the reply has to reach the module's own callback.
     a.send(RESULT, { id: call.payload.id, ok: true, value: 15 });
@@ -825,8 +828,6 @@ pkgs.runCommand "web-variant-tests" {
     }
     console.log('PASS: a wasm image called its dependency and the reply landed '
                 + 'in the callback, on a token capability_module granted it');
-    console.log('PASS: the capability handshake runs once per target, not once '
-                + 'per call -- and the one the hook ran is the one that counts');
 
     // ── the refusal ─────────────────────────────────────────────────────────
     //
@@ -860,7 +861,7 @@ pkgs.runCommand "web-variant-tests" {
     // call asks again rather than inheriting the first attempt's verdict --
     // which is what makes a grant that arrives late still usable.
     b.send(CALL, { id: 2, authToken: "", object: 'web_rust_caller',
-                   method: 'kick', args: [5] });
+                   method: 'kick', args: [KICK_AMOUNT] });
     const reask = b.outbound()[1];
     if (!reask || reask.payload.object !== 'capability_module') {
       fail('a call after a refused grant did not re-run the handshake', b.heard);
