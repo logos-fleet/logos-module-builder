@@ -14,6 +14,18 @@
 //! `target_os = "emscripten"`, lidl-gen emits it under the same gate), so this
 //! file is also the assertion that the surviving half is usable: if the gate
 //! took the async twin with it, this fixture would not compile.
+//!
+//! AND IT CALLS OUT FROM `on_context_ready`, which is the earliest moment a
+//! module has to call anything and the one an author reaches for first —
+//! "push my configuration into my dependency at load". That hook fires AT
+//! MODULE LOAD (the generated `install`), before any inbound dispatch, so in a
+//! wasm image it runs inside the host's `main()`. It used to reach a door the
+//! host had not opened yet: `lp_invoke_async` found no connection, refused the
+//! call INLINE, still returned LP_OK, and put nothing on the wire
+//! (logos-workspace#195). Nothing downstream could see the difference between
+//! that and a dependency that never answered, so the hook's call is a fixture
+//! method of its own: `boot()` reports what it got, and the harness asserts the
+//! frame reached the wire.
 
 // The generated scaffold — the provider glue AND the typed `modules()` clients
 // the builder generates from `dependency_overrides`.
@@ -26,6 +38,33 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
 /// every async callback in the SDK and not a property of this fixture.
 static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
+/// The same, for the call `on_context_ready` makes. Kept apart from `LAST` so
+/// the two cannot be confused for one another in a transcript: one is a call
+/// the module made because somebody asked it to, the other is one it made
+/// because it was loaded.
+static BOOT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The argument the load-time call carries. Distinct from anything `kick` is
+/// driven with, so a harness can tell the two frames apart by their payload.
+const BOOT_AMOUNT: i64 = 41;
+
+/// Park an outbound call's verdict where the reporting method can read it:
+/// `ok:<value>` or `err:<message>`.
+///
+/// One spelling for both callers, so a transcript reads the same whichever of
+/// them produced it. The slot is taken by reference rather than captured
+/// because the door's callback is `FnOnce + Send + 'static`, which the statics
+/// are and a field on the impl is not.
+fn record_outcome<T: std::fmt::Display, E: std::fmt::Display>(
+    slot: &'static std::sync::Mutex<String>,
+    result: std::result::Result<T, E>,
+) {
+    *slot.lock().unwrap() = match result {
+        Ok(v) => format!("ok:{}", v),
+        Err(e) => format!("err:{}", e),
+    };
+}
+
 pub trait WebRustCallerModule: Send + 'static {
     /// Fire `stub_target.increment(amount)` and return at once. The answer
     /// arrives later, in `last()`.
@@ -33,6 +72,11 @@ pub trait WebRustCallerModule: Send + 'static {
 
     /// `""` while the call is in flight, then `ok:<value>` or `err:<message>`.
     fn last(&mut self) -> String;
+
+    /// The same report for the call made from `on_context_ready`. `""` means
+    /// it is still in flight — or, before logos-workspace#195, that it was
+    /// refused inline and never reached the wire at all.
+    fn boot(&mut self) -> String;
 
     fn on_context_ready(&mut self, _ctx: &RustModuleContext) {}
 }
@@ -49,18 +93,23 @@ impl WebRustCallerModule for WebRustCallerImpl {
             let mut slot = LAST.lock().unwrap();
             slot.clear();
         }
-        modules().stub_target.increment_async(amount, |result| {
-            let mut slot = LAST.lock().unwrap();
-            *slot = match result {
-                Ok(v) => format!("ok:{}", v),
-                Err(e) => format!("err:{}", e),
-            };
-        });
+        modules().stub_target.increment_async(amount, |result| record_outcome(&LAST, result));
         "dispatched".to_string()
     }
 
     fn last(&mut self) -> String {
         LAST.lock().unwrap().clone()
+    }
+
+    fn boot(&mut self) -> String {
+        BOOT.lock().unwrap().clone()
+    }
+
+    /// THE HOOK CALLS ITS DEPENDENCY. Nothing here is conditional on the
+    /// target: a module author writes this once and it has to behave the same
+    /// on a desktop host and inside a Worker.
+    fn on_context_ready(&mut self, _ctx: &RustModuleContext) {
+        modules().stub_target.increment_async(BOOT_AMOUNT, |result| record_outcome(&BOOT, result));
     }
 }
 
