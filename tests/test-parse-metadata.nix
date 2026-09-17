@@ -1174,4 +1174,43 @@ in [
     (parse ''{"name":"m","type":"core","platform":true,"dependencies":["a"]}'')
       .web_dependencies
     [ "a" ])
+
+  # ── web.optional_dependencies (logos-workspace#250) ────────────────────────
+  #
+  # The second edge set, per variant. It is what a `web` variant declares for a
+  # module the app image carries only SOMETIMES: loaded when it is there, not a
+  # load failure when it is not. Without it the wallet UI had one choice between
+  # refusing every build that lacked `wallet_backend_module` and never loading it
+  # on the builds that had it -- and it took the second, which is #250.
+  (assertEq "web.optional_dependencies is the variant's own list"
+    (parse ''{"name":"m","type":"core","dependencies":["a"],
+       "optional_dependencies":["b"],
+       "web":{"dependencies":["a"],"optional_dependencies":["c","d"]}}'')
+      .web_optional_dependencies
+    [ "c" "d" ])
+
+  (assertEq "absent web.optional_dependencies falls back to optional_dependencies"
+    (parse ''{"name":"m","type":"core","optional_dependencies":["b"],
+       "web":{"dependencies":[]}}'').web_optional_dependencies
+    [ "b" ])
+
+  (assertEq "a module declaring neither has an empty web optional list"
+    (parse ''{"name":"m","type":"core","dependencies":["a"]}'')
+      .web_optional_dependencies
+    [ ])
+
+  # One name, one answer about who must supply it -- the same rule the top-level
+  # pair is held to.
+  (assertThrows "a name in both of the variant's lists is refused"
+    (parse ''{"name":"m","type":"core",
+       "web":{"dependencies":["a"],"optional_dependencies":["a"]}}'')
+      .web_optional_dependencies)
+
+  (assertThrows "web.optional_dependencies must be a list"
+    (parse ''{"name":"m","type":"core","web":{"optional_dependencies":"a"}}'')
+      .web_optional_dependencies)
+
+  (assertThrows "platform: true with web.optional_dependencies is refused"
+    (parse ''{"name":"m","type":"core","platform":true,
+       "web":{"optional_dependencies":["x"]}}'').web_optional_dependencies)
 ]

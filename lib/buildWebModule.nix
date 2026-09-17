@@ -65,7 +65,11 @@ let
   # loader page, never the wasm: a `web` variant's entry point is a document,
   # and that is what makes the container's job identical for a page written in
   # JavaScript (slice 24) and one that is a compiled module.
-  manifestFile = builtins.toFile "${config.name}-web-manifest.json" (builtins.toJSON {
+  # Resolved once: it decides both whether the manifest carries the key at all
+  # and what goes in it.
+  webOptionalDeps = config.web_optional_dependencies or config.optional_dependencies or [ ];
+
+  manifestFile = builtins.toFile "${config.name}-web-manifest.json" (builtins.toJSON ({
     inherit (config) name version description category;
     author = config.author or "";
     type = config.type;
@@ -76,12 +80,24 @@ let
     # `config.web_dependencies` is `dependencies` unless metadata.json says
     # otherwise (parseMetadata: `web.dependencies`).
     dependencies = config.web_dependencies or config.dependencies or [];
+  } // lib.optionalAttrs (webOptionalDeps != [ ]) {
+    # THE SECOND EDGE SET, and only when there is one. An LGX manifest omits
+    # `optional_dependencies` entirely when empty (logos-package spec 0.6.0), so
+    # a variant that declares none serialises exactly as it did before this key.
+    #
+    # What it buys a `web` variant: a module the app image carries only
+    # sometimes is LOADED when it is there and is not a load failure when it is
+    # not (logos-workspace#250). `config.web_optional_dependencies` is
+    # `optional_dependencies` unless metadata.json says otherwise
+    # (parseMetadata: `web.optional_dependencies`).
+    optional_dependencies = webOptionalDeps;
+  } // {
     # THE VARIANT SAYS WHAT IT IS. A `web` variant may be hand-written
     # JavaScript or a compiled wasm host, and a host that wants to know (to log
     # it, to decide a memory budget, to refuse one on a device without wasm)
     # should not have to sniff the files. Additive: nothing reads it today.
     logos_web_runtime = "wasm";
-  });
+  }));
 
 in pkgs.stdenv.mkDerivation {
   pname = "logos-${config.name}-web";

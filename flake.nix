@@ -470,6 +470,14 @@
           inherit (lib) parseMetadata;
           fixturesRoot = ./tests/fixtures;
         };
+        # THE ARTIFACT AGAINST THE SOURCE (logos-workspace#250): the comparison
+        # lib.checkWebManifest runs, driven over manifests that are wrong on
+        # purpose. Cheap -- it builds no wasm -- and it is the only place the
+        # check is shown REFUSING something.
+        web-manifest-check = import ./tests/test-web-manifest-check.nix {
+          inherit pkgs;
+          inherit (nixpkgs) lib;
+        };
         # Integration test: verifies static library (.a) support in EXTERNAL_LIBS
         static-extlib = import ./tests/test-static-extlib.nix {
           inherit pkgs;

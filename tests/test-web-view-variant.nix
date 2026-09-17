@@ -53,7 +53,8 @@ let
                             + "web.view_backend must not expose a `web` output")
        else true;
 
-in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
+in assert qmlOnlyHasNoWeb;
+pkgs.runCommand "web-view-variant-tests" { nativeBuildInputs = [ pkgs.jq pkgs.bash ]; } ''
   set -euo pipefail
 
   variant=${counterWeb}/web_counter_web
@@ -144,6 +145,16 @@ in assert qmlOnlyHasNoWeb; pkgs.runCommand "web-view-variant-tests" { } ''
   grep -q '"qml": *"view/Counter.qml"' "$variant/manifest.json" \
     || { echo "FAIL: the manifest does not name the module's QML document"; exit 1; }
   echo "PASS: the manifest says this is a qml web variant and names its parts"
+
+  # ── ...AND WHAT IT DECLARES IS WHAT THE SOURCE DOES (#250) ────────────────
+  #
+  # The real artifact, against the real metadata.json, through the comparison
+  # lib.checkWebManifest runs. The fixture declares no dependencies at all, so
+  # what this pins here is the EMPTY case -- a manifest that grew a name nobody
+  # wrote, which the core would refuse the whole module over.
+  # tests/test-web-manifest-check.nix is where the comparison is shown refusing.
+  bash ${../lib/check-web-manifest.sh} web_counter \
+    ${fixturesRoot + "/web-view-counter/metadata.json"} "$variant/manifest.json"
 
   # ── the runtime is NOT in here ────────────────────────────────────────────
   #
