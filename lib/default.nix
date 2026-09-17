@@ -62,6 +62,11 @@ let
     inherit buildWebViewModule;
   };
 
+  # THE ARTIFACT'S OWN CHECK (logos-workspace#250). A consumer wires it into its
+  # `checks` so that what it SHIPS is compared with what its metadata.json says,
+  # which is the one difference a source-level test cannot see.
+  checkWebManifest = pkgs: import ./checkWebManifest.nix { inherit pkgs; };
+
   # Import sub-builders that remain backend-agnostic
   mkExternalLib = import ./mkExternalLib.nix { inherit lib common; };
   mkStandaloneApp = import ./mkStandaloneApp.nix;
@@ -90,6 +95,7 @@ in {
   inherit buildWebModule;      # the `web` variant (Wasm host + loader page)
   inherit buildWebViewModule;  # the ui_qml `web` variant (QML + Qt-wasm view backend)
   inherit moduleImplAbiFor;    # logos-protocol's published module-impl ABI
+  inherit checkWebManifest;    # shipped `web` manifest vs source metadata.json
 
   # Utilities
   inherit parseMetadata;

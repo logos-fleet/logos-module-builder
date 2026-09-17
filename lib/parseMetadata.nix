@@ -170,6 +170,22 @@ in
                + "true` if its access is reachable from a Web container after "
                + "all.");
 
+      # THE `web` VARIANT'S HARD DEPENDENCY NAMES, resolved once. Published as
+      # `web_dependencies` and checked against by `web_optional_dependencies`,
+      # which cannot read it as an attribute because the result set is not
+      # `rec` -- and two copies of this fallback rule is exactly how the two
+      # keys would come to disagree about what a variant requires.
+      webHardNames_ =
+        let declared = ((raw.web or {}).dependencies or null); in
+        if declared == null then
+          noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
+        else if platform_ then refuseWebWhenPlatform "dependencies"
+        else if !(builtins.isList declared) then
+          throw ("metadata.json: web.dependencies must be a list of module names in "
+                 + "module '${moduleName_}', got: ${builtins.toJSON declared}")
+        else
+          noDuplicateNames "web.dependencies" (depNames_ "web.dependencies" declared);
+
       type_       = raw.type or "core";
       interface_  = raw.interface or "legacy";
       codegen_    = let c = raw.codegen or {}; in if builtins.isAttrs c then c else {};
@@ -570,16 +586,54 @@ in
       # NOT a subset check. A `web` variant may need something the native build
       # does not -- a module that only exists on a phone -- and a rule that
       # forbade it would be guessing about a direction nothing has taken yet.
-      web_dependencies =
-        let declared = ((raw.web or {}).dependencies or null); in
-        if declared == null then
-          noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
-        else if platform_ then refuseWebWhenPlatform "dependencies"
-        else if !(builtins.isList declared) then
-          throw ("metadata.json: web.dependencies must be a list of module names in "
-                 + "module '${raw.name or "?"}', got: ${builtins.toJSON declared}")
-        else
-          noDuplicateNames "web.dependencies" (depNames_ "web.dependencies" declared);
+      web_dependencies = webHardNames_;
+
+      # ── ...and what it can call but does not NEED ─────────────────────────
+      #
+      # The same second edge set as `optional_dependencies`, for the same
+      # reason a `web` variant has its own hard list: the two builds reach
+      # different modules, so they have different answers to "may be absent".
+      #
+      # THIS IS THE KEY A VARIANT USES FOR A MODULE THE IMAGE MAY OR MAY NOT
+      # CARRY. logos-evm-wallet-ui is the case it exists for
+      # (logos-workspace#250): `wallet_backend_module` and `railgun_module` are
+      # Bundled members an app image carries only when `--bundle` asked for
+      # them, and the wallet's `web` half calls both when they are there.
+      # Declaring them HARD would refuse the whole wallet on an image without
+      # them -- trading every wallet build for two tabs -- and leaving them
+      # undeclared is what #250 reported: never loaded, so never callable, so
+      # three screens refusing a module that was sitting in the image.
+      # Optional is the shape that says exactly that: load it if it is here.
+      #
+      # Absent means `optional_dependencies`, the same way `web.dependencies`
+      # falls back to `dependencies`.
+      #
+      # Refused when a name is in this variant's HARD list, for the reason the
+      # top-level pair is refused: one name, one answer about who must supply it.
+      web_optional_dependencies =
+        let
+          declared = ((raw.web or {}).optional_dependencies or null);
+          optNames =
+            if declared == null then
+              noDuplicateNames "optional_dependencies"
+                (depNames_ "optional_dependencies" (raw.optional_dependencies or []))
+            else if platform_ then refuseWebWhenPlatform "optional_dependencies"
+            else if !(builtins.isList declared) then
+              throw ("metadata.json: web.optional_dependencies must be a list of module "
+                     + "names in module '${moduleName_}', got: "
+                     + builtins.toJSON declared)
+            else
+              noDuplicateNames "web.optional_dependencies"
+                (depNames_ "web.optional_dependencies" declared);
+          hardDup = lib.intersectLists optNames webHardNames_;
+        in
+          if hardDup != [] then
+            throw ("metadata.json: module '${moduleName_}' declares "
+                   + builtins.concatStringsSep ", " hardDup
+                   + " in BOTH the `web` variant's required and optional dependency "
+                   + "lists. A dependency is either required at load time or not; keep "
+                   + "the entry in one list.")
+          else optNames;
 
       # Names of external_libraries entries built with go_build (for CMake whole-archive link flags)
       go_static_lib_names = map (x: x.name) (lib.filter (x: x ? go_build && x.go_build == true)

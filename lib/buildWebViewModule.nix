@@ -92,7 +92,14 @@ let
   # can never collide with the five names this builder owns.
   viewEntry = "view/${qmlEntry}";
 
-  manifestFile = builtins.toFile "${config.name}-web-view-manifest.json" (builtins.toJSON {
+  # THE SECOND EDGE SET, same key and same reason as the Bare variant's manifest
+  # (buildWebModule.nix): a module the app image carries only sometimes is
+  # LOADED when it is there and is not a load failure when it is not
+  # (logos-workspace#250). Resolved once because it decides both whether the
+  # manifest carries the key at all and what goes in it.
+  webOptionalDeps = config.web_optional_dependencies or config.optional_dependencies or [ ];
+
+  manifestFile = builtins.toFile "${config.name}-web-view-manifest.json" (builtins.toJSON ({
     inherit (config) name version description category;
     author = config.author or "";
     type = config.type;
@@ -119,7 +126,13 @@ let
       # rather than to guess at a file name.
       headless = "host.html";
     };
-  });
+  }
+  # ...AND THE OPTIONAL LIST ONLY WHEN THERE IS ONE. An LGX manifest omits
+  # `optional_dependencies` entirely when empty (logos-package spec 0.6.0), so a
+  # variant that declares none serialises exactly as it did before this key.
+  // lib.optionalAttrs (webOptionalDeps != [ ]) {
+    optional_dependencies = webOptionalDeps;
+  }));
 
 in pkgs.stdenv.mkDerivation {
   pname = "logos-${config.name}-web-view";
