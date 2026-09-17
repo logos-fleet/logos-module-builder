@@ -14,7 +14,7 @@
 #
 # It is the shipped script that is run, not a copy of its rule: a test that
 # re-implemented the comparison would pass while the check was broken.
-{ pkgs, lib }:
+{ pkgs }:
 
 pkgs.runCommand "web-manifest-check-tests"
   { nativeBuildInputs = [ pkgs.jq pkgs.bash ]; }

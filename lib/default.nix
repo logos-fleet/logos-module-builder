@@ -65,7 +65,7 @@ let
   # THE ARTIFACT'S OWN CHECK (logos-workspace#250). A consumer wires it into its
   # `checks` so that what it SHIPS is compared with what its metadata.json says,
   # which is the one difference a source-level test cannot see.
-  checkWebManifest = pkgs: import ./checkWebManifest.nix { inherit pkgs lib; };
+  checkWebManifest = pkgs: import ./checkWebManifest.nix { inherit pkgs; };
 
   # Import sub-builders that remain backend-agnostic
   mkExternalLib = import ./mkExternalLib.nix { inherit lib common; };

@@ -27,35 +27,46 @@ test -s "$manifest"  || { echo "FAIL: $name ships no manifest.json at $manifest"
 # two manifests that differ only in order are two different startups.
 names='[ .[]? | if type == "string" then . else .name end ]'
 
-# THE RULE parseMetadata RESOLVES, re-stated (web_dependencies,
-# web_optional_dependencies): a `web` variant may declare its own lists, and
-# absent means the module's.
-expect_deps=$(jq -c "if .web.dependencies == null then .dependencies else .web.dependencies end | $names" "$metadata")
-expect_opt=$(jq -c "if .web.optional_dependencies == null then .optional_dependencies else .web.optional_dependencies end | $names" "$metadata")
+# THE RULE parseMetadata RESOLVES, re-stated once for both lists
+# (web_dependencies, web_optional_dependencies): a `web` variant may declare its
+# own list under `web`, and absent means the module's.
+declared() {
+  jq -c "if .web.$1 == null then .$1 else .web.$1 end | $names" "$metadata"
+}
 
-got_deps=$(jq -c ".dependencies | $names" "$manifest")
-# Absent is the same as empty: an LGX manifest omits `optional_dependencies`
-# entirely when a package declares none (logos-package spec 0.6.0).
-got_opt=$(jq -c ".optional_dependencies | $names" "$manifest")
+# The same list as the artifact spells it. Absent is the same as empty: an LGX
+# manifest omits `optional_dependencies` entirely when a package declares none
+# (logos-package spec 0.6.0).
+shipped() {
+  jq -c ".$1 | $names" "$manifest"
+}
 
 fail=0
-if [ "$expect_deps" != "$got_deps" ]; then
-  echo "FAIL: $name's shipped web manifest declares different dependencies"
-  echo "      metadata.json: $expect_deps"
-  echo "      manifest.json: $got_deps"
-  fail=1
-else
-  echo "PASS: $name dependencies match: $got_deps"
-fi
 
-if [ "$expect_opt" != "$got_opt" ]; then
-  echo "FAIL: $name's shipped web manifest declares different optional_dependencies"
-  echo "      metadata.json: $expect_opt"
-  echo "      manifest.json: $got_opt"
-  fail=1
-else
-  echo "PASS: $name optional_dependencies match: $got_opt"
-fi
+# One list, reported the same way whichever it is: which list differs AND both
+# values, because "they differ" on its own is a second debugging session.
+compare() {
+  local list=$1 want=$2 got=$3
+  if [ "$want" != "$got" ]; then
+    echo "FAIL: $name's shipped web manifest declares different $list"
+    echo "      metadata.json: $want"
+    echo "      manifest.json: $got"
+    fail=1
+  else
+    echo "PASS: $name $list match: $got"
+  fi
+}
+
+# Assigned first, and not substituted into the call: `set -e` fails an
+# assignment whose command substitution failed, and says nothing about one that
+# was merely an argument.
+expect_deps=$(declared dependencies)
+expect_opt=$(declared optional_dependencies)
+got_deps=$(shipped dependencies)
+got_opt=$(shipped optional_dependencies)
+
+compare dependencies "$expect_deps" "$got_deps"
+compare optional_dependencies "$expect_opt" "$got_opt"
 
 # Name and version too, cheaply: a manifest carrying a DIFFERENT module's
 # dependency lists would pass everything above.

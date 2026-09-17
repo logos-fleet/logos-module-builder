@@ -22,7 +22,7 @@
 # The rule it re-states (parseMetadata: `web_dependencies`,
 # `web_optional_dependencies`) lives in check-web-manifest.sh beside the
 # comparison, so the check and its own test run one implementation.
-{ pkgs, lib }:
+{ pkgs }:
 
 {
   # The module's name, which is also the package directory the `web` builders
@@ -45,9 +45,9 @@ pkgs.runCommand "${name}-web-manifest-check"
     manifest=${webPackage}/${name}_web/manifest.json
     test -s "$manifest" || {
       echo "FAIL: the ${name} web variant ships no ${name}_web/manifest.json"
-      find ${webPackage} -maxdepth 2 >&2
+      find ${webPackage} -maxdepth 2
       exit 1
     }
-    bash ${../lib/check-web-manifest.sh} ${name} ${metadataFile} "$manifest"
+    bash ${./check-web-manifest.sh} ${name} ${metadataFile} "$manifest"
     touch $out
   ''

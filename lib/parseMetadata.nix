@@ -170,6 +170,22 @@ in
                + "true` if its access is reachable from a Web container after "
                + "all.");
 
+      # THE `web` VARIANT'S HARD DEPENDENCY NAMES, resolved once. Published as
+      # `web_dependencies` and checked against by `web_optional_dependencies`,
+      # which cannot read it as an attribute because the result set is not
+      # `rec` -- and two copies of this fallback rule is exactly how the two
+      # keys would come to disagree about what a variant requires.
+      webHardNames_ =
+        let declared = ((raw.web or {}).dependencies or null); in
+        if declared == null then
+          noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
+        else if platform_ then refuseWebWhenPlatform "dependencies"
+        else if !(builtins.isList declared) then
+          throw ("metadata.json: web.dependencies must be a list of module names in "
+                 + "module '${moduleName_}', got: ${builtins.toJSON declared}")
+        else
+          noDuplicateNames "web.dependencies" (depNames_ "web.dependencies" declared);
+
       type_       = raw.type or "core";
       interface_  = raw.interface or "legacy";
       codegen_    = let c = raw.codegen or {}; in if builtins.isAttrs c then c else {};
@@ -570,16 +586,7 @@ in
       # NOT a subset check. A `web` variant may need something the native build
       # does not -- a module that only exists on a phone -- and a rule that
       # forbade it would be guessing about a direction nothing has taken yet.
-      web_dependencies =
-        let declared = ((raw.web or {}).dependencies or null); in
-        if declared == null then
-          noDuplicateNames "dependencies" (depNames_ "dependencies" (raw.dependencies or []))
-        else if platform_ then refuseWebWhenPlatform "dependencies"
-        else if !(builtins.isList declared) then
-          throw ("metadata.json: web.dependencies must be a list of module names in "
-                 + "module '${raw.name or "?"}', got: ${builtins.toJSON declared}")
-        else
-          noDuplicateNames "web.dependencies" (depNames_ "web.dependencies" declared);
+      web_dependencies = webHardNames_;
 
       # ── ...and what it can call but does not NEED ─────────────────────────
       #
@@ -613,23 +620,15 @@ in
             else if platform_ then refuseWebWhenPlatform "optional_dependencies"
             else if !(builtins.isList declared) then
               throw ("metadata.json: web.optional_dependencies must be a list of module "
-                     + "names in module '${raw.name or "?"}', got: "
+                     + "names in module '${moduleName_}', got: "
                      + builtins.toJSON declared)
             else
               noDuplicateNames "web.optional_dependencies"
                 (depNames_ "web.optional_dependencies" declared);
-          # The SAME rule web_dependencies above resolves, re-stated rather than
-          # referenced: these are sibling attributes of the result set, not
-          # `let` bindings, so one cannot read the other.
-          hardNames =
-            let hard = ((raw.web or {}).dependencies or null); in
-            if hard == null then depNames_ "dependencies" (raw.dependencies or [])
-            else if builtins.isList hard then depNames_ "web.dependencies" hard
-            else [ ];
-          hardDup = lib.intersectLists optNames hardNames;
+          hardDup = lib.intersectLists optNames webHardNames_;
         in
           if hardDup != [] then
-            throw ("metadata.json: module '${raw.name or "?"}' declares "
+            throw ("metadata.json: module '${moduleName_}' declares "
                    + builtins.concatStringsSep ", " hardDup
                    + " in BOTH the `web` variant's required and optional dependency "
                    + "lists. A dependency is either required at load time or not; keep "
